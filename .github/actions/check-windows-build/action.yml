@@ -1,0 +1,66 @@
+name: Check the Windows build
+description: >-
+  Checks dist/BetterVoice after scripts/build.py, then installs the standard
+  edition's installer, checks the installation, and uninstalls it again.
+
+runs:
+  using: composite
+  steps:
+    - name: Version information of the exe
+      shell: pwsh
+      run: |
+        $expected = python -c "import bettervoice; print(bettervoice.__version__)"
+        $info = (Get-Item dist/BetterVoice/BetterVoice.exe).VersionInfo
+        if ($info.ProductName -ne "BetterVoice" -or $info.ProductVersion -ne $expected) {
+          throw "Unexpected version information: $($info.ProductName) $($info.ProductVersion)"
+        }
+
+    - name: Start the app
+      shell: pwsh
+      run: |
+        # --version returns at once; a module missing from the build would
+        # stop the app with an error dialog instead
+        $app = Start-Process dist/BetterVoice/BetterVoice.exe -ArgumentList "--version" -PassThru
+        $null = $app.Handle  # keeps the exit code readable
+        if (-not $app.WaitForExit(60000)) {
+          $app.Kill()
+          throw "BetterVoice.exe --version did not exit"
+        }
+        if ($app.ExitCode -ne 0) { throw "BetterVoice.exe --version exited with $($app.ExitCode)" }
+
+    - name: Install and uninstall
+      shell: pwsh
+      run: |
+        $setup = (Get-Item dist/BetterVoice-*-win-x64-setup.exe).FullName
+        $dir = Join-Path $env:RUNNER_TEMP "BetterVoice"
+        $log = Join-Path $env:RUNNER_TEMP "setup.log"
+        $run = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+        $shortcut = Join-Path ([Environment]::GetFolderPath("Programs")) "BetterVoice.lnk"
+
+        # "Start with Windows" of an unzipped copy: the installation takes it over
+        Set-ItemProperty $run -Name BetterVoice -Value '"C:\Unzipped\BetterVoice\BetterVoice.exe"'
+        $install = Start-Process $setup -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES",
+          "/NORESTART", "/DIR=$dir", "/LOG=$log" -Wait -PassThru
+        if ($install.ExitCode -ne 0) {
+          Get-Content $log
+          throw "Setup exited with $($install.ExitCode)"
+        }
+        foreach ($path in "$dir\BetterVoice.exe", "$dir\LICENSE", "$dir\unins000.exe", $shortcut) {
+          if (-not (Test-Path $path)) { throw "Setup did not create $path" }
+        }
+        $autostart = (Get-ItemProperty $run).BetterVoice
+        if ($autostart -ne "`"$dir\BetterVoice.exe`"") { throw "Autostart still starts $autostart" }
+
+        Start-Process "$dir\unins000.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES",
+          "/NORESTART" -Wait
+        # Uninstall finishes in a copy of itself, which removes the folder last
+        $deadline = (Get-Date).AddMinutes(2)
+        while ((Test-Path $dir) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+        if (Test-Path $dir) {
+          Get-ChildItem $dir -Recurse | Select-Object -First 20 | ForEach-Object FullName
+          throw "Uninstall left files behind in $dir"
+        }
+        if (Test-Path $shortcut) { throw "Uninstall left the Start menu shortcut behind" }
+        if ($null -ne (Get-ItemProperty $run).BetterVoice) {
+          throw "Uninstall left the autostart entry behind"
+        }

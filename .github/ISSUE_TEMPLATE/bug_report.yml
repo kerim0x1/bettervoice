@@ -1,0 +1,55 @@
+name: Bug report
+description: Describe a reproducible problem in BetterVoice.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "For vulnerabilities, follow SECURITY.md. Remove API keys and personal text from logs before posting."
+  - type: input
+    id: version
+    attributes:
+      label: BetterVoice version
+      description: Shown in the sidebar of the settings window, or run `bettervoice --version`.
+      placeholder: 0.1.0b1
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 24H2, 64-bit
+    validations:
+      required: true
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Engine
+      options:
+        - Local (offline)
+        - Deepgram
+        - ElevenLabs
+        - OpenRouter
+        - Not engine-specific
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Include the program you dictated into and the language setting.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior
+      description: Quote any message the pill showed.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log excerpt
+      description: Settings… → General → Open log. It holds status messages only; review it before posting.
+      render: text

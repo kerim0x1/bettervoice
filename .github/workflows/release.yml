@@ -1,0 +1,127 @@
+# Publishes a release on GitHub when a version tag is pushed:
+#
+#     git tag v0.1.0b1
+#     git push origin v0.1.0b1
+#
+# The tag must match __version__ in src/bettervoice/__init__.py, and
+# CHANGELOG.md needs a `## <version>` section: it becomes the release notes.
+# The workflow lints and tests, builds both editions as installer and zip,
+# checks the installer, and publishes everything with SHA256SUMS.txt. Beta and
+# release-candidate versions become pre-releases.
+#
+# Run by hand (Actions > Release > Run workflow), it builds the same files as
+# a workflow artifact and publishes nothing.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Test and build
+    runs-on: windows-latest
+    timeout-minutes: 90
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: python -m pip install -e ".[dev,build,gpu]"
+
+      - name: Check the version
+        id: version
+        shell: pwsh
+        run: |
+          $version = python -c "import bettervoice; print(bettervoice.__version__)"
+          if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Tag $env:GITHUB_REF_NAME does not match version $version in src/bettervoice/__init__.py"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test
+        run: python -m pytest
+
+      - name: Install Inno Setup if the runner lacks it
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --no-progress -y
+          }
+
+      - name: Build both editions
+        run: python scripts/build.py --release
+
+      - name: Check the build
+        uses: ./.github/actions/check-windows-build
+
+      - name: Release notes
+        run: python scripts/release_notes.py --out dist/release-notes.md
+
+      - name: Upload the release files
+        uses: actions/upload-artifact@v7
+        with:
+          name: release
+          path: |
+            dist/BetterVoice-*.zip
+            dist/BetterVoice-*-setup.exe
+            dist/SHA256SUMS.txt
+            dist/release-notes.md
+          if-no-files-found: error
+          compression-level: 0  # zips and installers are compressed already
+          retention-days: 14
+
+  publish:
+    name: Publish on GitHub Releases
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: Download the release files
+        uses: actions/download-artifact@v8
+        with:
+          name: release
+          path: dist
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          files=(dist/BetterVoice-*.zip dist/BetterVoice-*-setup.exe dist/SHA256SUMS.txt)
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            # a re-run: replace the files, keep the text
+            gh release upload "$TAG" "${files[@]}" --clobber
+          else
+            flags=(--title "BetterVoice $VERSION" --notes-file dist/release-notes.md --verify-tag)
+            if [[ "$VERSION" =~ (a|b|rc)[0-9]+$ ]]; then flags+=(--prerelease); fi
+            gh release create "$TAG" "${files[@]}" "${flags[@]}"
+          fi
