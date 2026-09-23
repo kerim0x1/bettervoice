@@ -6,6 +6,7 @@ warm white at 38 / 72 / 100 / 40 % opacity. BetterC0de lays its bars down as
 lines of code; BetterVoice stands them up as a voice level.
 """
 
+import io
 import os
 
 from PIL import Image, ImageDraw
@@ -15,8 +16,8 @@ from bettervoice import __version__
 NAME = "BetterVoice"
 TAGLINE = "Your voice, typed anywhere."
 DESCRIPTION = (
-    "BetterVoice is a Windows dictation app: press Win+O, speak, and your words "
-    "appear wherever your cursor is."
+    "BetterVoice is a dictation app for Windows, macOS and Linux: press a hotkey, "
+    "speak, and your words appear wherever your cursor is."
 )
 AUTHOR = "kerim0x1"
 REPO_URL = "https://github.com/kerim0x1/bettervoice"
@@ -47,7 +48,9 @@ BARS = (  # (height, warm-white opacity), left to right, centered vertically
 )
 _FIRST_BAR_X = (100 - BAR_WIDTH * len(BARS) - (BAR_PITCH - BAR_WIDTH) * (len(BARS) - 1)) / 2
 
-ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "icon.ico")
+_ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+ICON_PATH = os.path.join(_ASSETS, "icon.ico")  # Windows: exe, windows, tray
+ICON_PNG_PATH = os.path.join(_ASSETS, "icon.png")  # macOS and Linux windows
 ICON_SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)  # 100-200 % small and large icons
 
 
@@ -92,6 +95,30 @@ def draw_mark(size):
                    (x + BAR_WIDTH) * k * ss, (50 + height / 2) * k * ss]
         draw.rounded_rectangle(box, radius=max(0.5, BAR_RADIUS * k) * ss, fill=_on_tile(opacity))
     return img.resize((size, size), Image.BOX if snap else Image.LANCZOS)
+
+
+def draw_menu_bar_icon(size):
+    """The bars alone, black at the mark's opacities on nothing: macOS uses
+    such a template image's alpha and tints it for the menu bar."""
+    ss = 4
+    canvas = size * ss
+    img = Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    width = BAR_PITCH * (len(BARS) - 1) + BAR_WIDTH
+    k = canvas * 0.86 / width  # the bars fill the icon's width
+    left = (canvas - width * k) / 2
+    for i, (height, opacity) in enumerate(BARS):
+        x = left + i * BAR_PITCH * k
+        h = height * k
+        draw.rounded_rectangle([x, (canvas - h) / 2, x + BAR_WIDTH * k, (canvas + h) / 2],
+                               radius=BAR_RADIUS * k, fill=(0, 0, 0, round(opacity * 255)))
+    return img.resize((size, size), Image.LANCZOS)
+
+
+def png_bytes(image):
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def mark_svg():

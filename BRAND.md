@@ -20,7 +20,7 @@ BetterVoice is a sibling of [BetterC0de](https://betterc0de.com). The two share 
 
 **One-sentence description**
 
-> BetterVoice is a Windows dictation app: press Win+O, speak, and your words appear wherever your cursor is.
+> BetterVoice is a dictation app for Windows, macOS and Linux: press a hotkey, speak, and your words appear wherever your cursor is.
 
 **Short product introduction**
 

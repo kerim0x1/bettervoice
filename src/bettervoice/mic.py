@@ -1,12 +1,19 @@
 """Microphone capture: 16 kHz mono int16, delivered in 50 ms chunks."""
 
 import numpy as np
-import sounddevice as sd
+
+from bettervoice.stt.errors import SttError
+
+try:
+    import sounddevice as sd
+except OSError as e:  # Linux without PortAudio: say so when recording starts
+    sd = None
+    _missing = str(e)
 
 SAMPLE_RATE = 16000
 CHUNK_MS = 50
 
-PortAudioError = sd.PortAudioError
+PortAudioError = sd.PortAudioError if sd is not None else OSError
 
 
 class Microphone:
@@ -21,6 +28,8 @@ class Microphone:
         self.stream = None
 
     def start(self):
+        if sd is None:
+            raise SttError("Install PortAudio (libportaudio2) to record", _missing)
         self.stream = sd.RawInputStream(
             samplerate=SAMPLE_RATE,
             blocksize=SAMPLE_RATE * CHUNK_MS // 1000,

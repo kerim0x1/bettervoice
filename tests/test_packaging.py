@@ -8,7 +8,7 @@ import re
 import pytest
 from PIL import Image
 
-from bettervoice import __version__, app, autostart, brand
+from bettervoice import __version__, autostart, brand
 from conftest import ROOT
 
 
@@ -33,7 +33,10 @@ def size_of(path):
 
 def test_installer_matches_the_app():
     # Setup and Uninstall recognize the running app by its mutex...
-    assert re.search(r"^AppMutex=(.*)$", ISS, re.M).group(1) == app._MUTEX_NAMES[0]
+    with open(os.path.join(ROOT, "src", "bettervoice", "desktop", "windows.py"),
+              encoding="utf-8") as f:
+        mutex = re.search(r'^MUTEX_NAMES = \("([^"]+)"', f.read(), re.M).group(1)
+    assert re.search(r"^AppMutex=(.*)$", ISS, re.M).group(1) == mutex
     # ...and remove the autostart entry it writes, which they know as {#AppName}
     assert f"RunKey = '{autostart.RUN_KEY}';" in ISS
     assert autostart.VALUE_NAME == brand.NAME
@@ -86,9 +89,19 @@ def test_release_notes(monkeypatch):
 
     text = release_notes.notes("1.1.0", entry)
     assert text.startswith(entry)
-    # links to exactly the files the build makes
-    monkeypatch.setattr(build, "__version__", "1.1.0")
+    # links to exactly the files the build makes, on each system
     base = f"{brand.REPO_URL}/releases/download/v1.1.0"
-    for name in (build.edition(False) + "-setup.exe", build.edition(True) + "-setup.exe",
-                 build.edition(False) + ".zip", build.edition(True) + ".zip", "SHA256SUMS.txt"):
-        assert f"[{name}]({base}/{name})" in text
+    monkeypatch.setattr(build, "__version__", "1.1.0")
+    monkeypatch.setattr(build, "WINDOWS", True)
+    names = [build.edition(cuda) + suffix for cuda in (False, True)
+             for suffix in ("-setup.exe", ".zip")]
+    monkeypatch.setattr(build, "WINDOWS", False)
+    monkeypatch.setattr(build, "MACOS", True)
+    for arch in ("arm64", "x64"):
+        monkeypatch.setattr(build, "arch", lambda arch=arch: arch)
+        names.append(build.edition() + ".dmg")
+    monkeypatch.setattr(build, "MACOS", False)
+    names.append(build.edition() + ".tar.gz")  # Linux, still x64
+    for name in names + ["SHA256SUMS.txt"]:
+        assert f"[{name}]({base}/{name})" in text, name
+    assert text.count("](https://") == len(names) + 1

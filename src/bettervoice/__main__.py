@@ -1,5 +1,5 @@
 """`python -m bettervoice` starts the app (see bettervoice.app for options)."""
 
-from bettervoice.app import run
+from bettervoice.cli import main
 
-run()
+main()

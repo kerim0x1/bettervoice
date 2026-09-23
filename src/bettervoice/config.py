@@ -1,8 +1,15 @@
 """Paths, persisted settings, engines and languages.
 
-Settings live as KEY=value lines in %APPDATA%\\BetterVoice\\.env (a .env in
-the repository root is read too, for development). Real environment
+Settings live as KEY=value lines in a .env file in the settings folder (a .env
+in the repository root is read too, for development). Real environment
 variables always win.
+
+    Windows  %APPDATA%\\BetterVoice                      settings, models, log
+    macOS    ~/Library/Application Support/BetterVoice  settings, models
+             ~/Library/Logs/BetterVoice                 log
+    Linux    ~/.config/bettervoice                      settings
+             ~/.local/share/bettervoice                 models
+             ~/.local/state/bettervoice                 log
 """
 
 import os
@@ -12,24 +19,43 @@ import threading
 
 # ----------------------------------------------------------------- paths ---
 
-if getattr(sys, "frozen", False):  # the packaged app: next to BetterVoice.exe
+if getattr(sys, "frozen", False):  # the packaged app: next to its executable
     APP_DIR = os.path.dirname(sys.executable)
 else:  # a source checkout: the repository root (src/bettervoice/../..)
     APP_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-_APPDATA = os.environ.get("APPDATA", APP_DIR)
-CONFIG_DIR = os.path.join(_APPDATA, "BetterVoice")
-LEGACY_DIR = os.path.join(_APPDATA, "Dictation")  # the data folder before the rename
+_HOME = os.path.expanduser("~")
+LEGACY_DIR = None  # the data folder before the rename (Windows only)
+if sys.platform == "win32":
+    _APPDATA = os.environ.get("APPDATA", APP_DIR)
+    CONFIG_DIR = DATA_DIR = LOG_DIR = RUNTIME_DIR = os.path.join(_APPDATA, "BetterVoice")
+    LEGACY_DIR = os.path.join(_APPDATA, "Dictation")
+elif sys.platform == "darwin":
+    CONFIG_DIR = DATA_DIR = RUNTIME_DIR = os.path.join(
+        _HOME, "Library", "Application Support", "BetterVoice")
+    LOG_DIR = os.path.join(_HOME, "Library", "Logs", "BetterVoice")
+else:  # Linux and other XDG desktops
+
+    def _xdg(variable, default):
+        return os.path.join(os.environ.get(variable) or os.path.join(_HOME, default),
+                            "bettervoice")
+
+    CONFIG_DIR = _xdg("XDG_CONFIG_HOME", ".config")
+    DATA_DIR = _xdg("XDG_DATA_HOME", os.path.join(".local", "share"))
+    LOG_DIR = _xdg("XDG_STATE_HOME", os.path.join(".local", "state"))
+    # the lock and the command socket: in memory, and gone after a reboot
+    RUNTIME_DIR = (os.path.join(os.environ["XDG_RUNTIME_DIR"], "bettervoice")
+                   if os.environ.get("XDG_RUNTIME_DIR") else DATA_DIR)
 CONFIG_ENV = os.path.join(CONFIG_DIR, ".env")
-LOG_PATH = os.path.join(CONFIG_DIR, "bettervoice.log")
-MODELS_DIR = os.path.join(CONFIG_DIR, "models")
+LOG_PATH = os.path.join(LOG_DIR, "bettervoice.log")
+MODELS_DIR = os.path.join(DATA_DIR, "models")
 
 
 def prepare_data_dir():
-    """Create the data folder; on the first start after the rename, take over
+    """Create the data folders; on the first start after the rename, take over
     the settings and models of the old one. Called when the app starts, never
     on import, so tests and tools don't touch real user data."""
-    if not os.path.exists(CONFIG_DIR) and os.path.isdir(LEGACY_DIR):
+    if LEGACY_DIR and not os.path.exists(CONFIG_DIR) and os.path.isdir(LEGACY_DIR):
         os.makedirs(CONFIG_DIR)
         legacy_env = os.path.join(LEGACY_DIR, ".env")
         if os.path.exists(legacy_env):
@@ -39,7 +65,8 @@ def prepare_data_dir():
             os.replace(os.path.join(LEGACY_DIR, "models"), MODELS_DIR)  # moved: gigabytes
         except OSError:
             pass  # none there, or in use: downloaded again when needed
-    os.makedirs(CONFIG_DIR, exist_ok=True)
+    for folder in {CONFIG_DIR, DATA_DIR, LOG_DIR, RUNTIME_DIR}:
+        os.makedirs(folder, mode=0o700, exist_ok=True)  # the settings hold API keys
 
 
 # --------------------------------------------------------------- engines ---
@@ -130,7 +157,7 @@ _lock = threading.Lock()
 
 
 def _load_env():
-    """Env vars win; then %APPDATA%\\BetterVoice\\.env; then the repository's .env."""
+    """Env vars win; then the settings folder's .env; then the repository's."""
     for path in (CONFIG_ENV, os.path.join(APP_DIR, ".env")):
         if not os.path.exists(path):
             continue
@@ -165,7 +192,7 @@ def get(name):
 
 
 def set(name, value):  # noqa: A001 - config.set() reads naturally
-    """Change a setting for this run and persist it to %APPDATA%."""
+    """Change a setting for this run and persist it in the settings folder."""
     env_names, _ = _SETTINGS[name]
     with _lock:
         os.environ[env_names[0]] = value
@@ -179,9 +206,13 @@ def set(name, value):  # noqa: A001 - config.set() reads naturally
                     if line.partition("=")[0].strip() not in env_names
                 ]
         lines.insert(0, f"{env_names[0]}={value}")
-        os.makedirs(os.path.dirname(CONFIG_ENV), exist_ok=True)
-        with open(CONFIG_ENV, "w", encoding="utf-8") as f:
+        os.makedirs(os.path.dirname(CONFIG_ENV), mode=0o700, exist_ok=True)
+        # only this user may read the API keys (on Windows, %APPDATA% is private)
+        fd = os.open(CONFIG_ENV, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
+        if os.name == "posix":
+            os.chmod(CONFIG_ENV, 0o600)  # also when an older version created it
 
 
 def enabled(name):

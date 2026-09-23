@@ -6,22 +6,18 @@ dot), processing (dimmed bars + grey dot), message (text, e.g. an error or
 "the model is loading"; the pill widens to fit), hidden.
 """
 
-import ctypes
-import ctypes.wintypes as wt
 import math
 import tkinter as tk
 import tkinter.font as tkfont
 
 from bettervoice import brand
-
-user32 = ctypes.windll.user32
+from bettervoice.desktop import system
 
 # the brand's near-black tile and warm-white ink
 PILL_W, PILL_H = 176, 40
 MAX_W = 460  # messages wider than this are cut off
 TEXT_PAD = 22
 N_BARS = 26
-TRANSPARENT = "#ff00fe"  # color key: everything this color is see-through
 BG = brand.NEAR_BLACK
 BG_ERROR = "#3a1418"
 BG_INFO = "#1c1c1e"
@@ -30,83 +26,6 @@ BAR_DIM = "#5d5d5c"
 DOT_REC = "#ff4d5e"
 DOT_PROC = "#b1b1af"
 TEXT = brand.WARM_WHITE
-
-GWL_EXSTYLE = -20
-WS_EX_TOOLWINDOW = 0x00000080  # no taskbar button
-WS_EX_NOACTIVATE = 0x08000000  # never becomes the foreground window
-MONITOR_DEFAULTTONEAREST = 2
-
-
-class POINT(ctypes.Structure):
-    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-
-
-class GUITHREADINFO(ctypes.Structure):
-    _fields_ = [
-        ("cbSize", wt.DWORD),
-        ("flags", wt.DWORD),
-        ("hwndActive", wt.HWND),
-        ("hwndFocus", wt.HWND),
-        ("hwndCapture", wt.HWND),
-        ("hwndMenuOwner", wt.HWND),
-        ("hwndMoveSize", wt.HWND),
-        ("hwndCaret", wt.HWND),
-        ("rcCaret", wt.RECT),
-    ]
-
-
-class MONITORINFO(ctypes.Structure):
-    _fields_ = [
-        ("cbSize", wt.DWORD),
-        ("rcMonitor", wt.RECT),
-        ("rcWork", wt.RECT),
-        ("dwFlags", wt.DWORD),
-    ]
-
-
-user32.MonitorFromPoint.argtypes = [POINT, wt.DWORD]
-user32.MonitorFromPoint.restype = ctypes.c_void_p
-user32.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.c_void_p]
-
-
-def enable_dpi_awareness():
-    """Make screen coordinates physical pixels so the pill lands exactly."""
-    try:
-        user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))  # per-monitor v2
-    except Exception:
-        try:
-            ctypes.windll.shcore.SetProcessDpiAwareness(2)
-        except Exception:
-            user32.SetProcessDpiAware()
-
-
-def caret_screen_pos():
-    """Screen position just below the text caret of the focused control.
-
-    Falls back to the mouse position (usually where the user last clicked
-    into the field) for apps that don't expose a caret, e.g. some browsers.
-    """
-    fg = user32.GetForegroundWindow()
-    tid = user32.GetWindowThreadProcessId(fg, None)
-    info = GUITHREADINFO(cbSize=ctypes.sizeof(GUITHREADINFO))
-    if user32.GetGUIThreadInfo(tid, ctypes.byref(info)) and info.hwndCaret:
-        pt = POINT(info.rcCaret.left, info.rcCaret.bottom)
-        user32.ClientToScreen(info.hwndCaret, ctypes.byref(pt))
-        return pt.x, pt.y + 10
-    pt = POINT()
-    user32.GetCursorPos(ctypes.byref(pt))
-    return pt.x + 12, pt.y + 18
-
-
-def clamp_to_work_area(x, y, w, h):
-    mon = user32.MonitorFromPoint(POINT(x, y), MONITOR_DEFAULTTONEAREST)
-    mi = MONITORINFO(cbSize=ctypes.sizeof(MONITORINFO))
-    user32.GetMonitorInfoW(mon, ctypes.byref(mi))
-    wa = mi.rcWork
-    return (
-        max(wa.left + 4, min(x, wa.right - w - 4)),
-        max(wa.top + 4, min(y, wa.bottom - h - 4)),
-    )
 
 
 class Overlay:
@@ -123,15 +42,18 @@ class Overlay:
         self.win = tk.Toplevel(root)
         self.win.overrideredirect(True)
         self.win.attributes("-topmost", True)
-        self.win.config(bg=TRANSPARENT)
-        self.win.attributes("-transparentcolor", TRANSPARENT)
-        self.canvas = tk.Canvas(
-            self.win, width=PILL_W, height=PILL_H, bg=TRANSPARENT, highlightthickness=0
-        )
+        # around the pill: see-through where the system has a color for it,
+        # else the window itself is cut to shape (system.shape_overlay)
+        self.canvas = tk.Canvas(self.win, width=PILL_W, height=PILL_H,
+                                bg=system.OVERLAY_KEY_COLOR or BG, highlightthickness=0)
         self.canvas.pack()
         self.win.withdraw()
-        self._make_no_activate()
-        self.font = tkfont.Font(family="Segoe UI", size=9)
+        system.prepare_overlay(self.win)
+        # the shape follows the window's size as the X server applies it
+        self.win.bind("<Configure>", lambda e: e.widget is self.win and system.shape_overlay(
+            self.win, e.width, e.height))
+        family = system.OVERLAY_FONT or tkfont.nametofont("TkDefaultFont").actual("family")
+        self.font = tkfont.Font(family=family, size=system.OVERLAY_FONT_SIZE)
         self._create_items()
 
         self.state = "hidden"  # hidden | recording | processing | message
@@ -141,12 +63,6 @@ class Overlay:
         self._is_status = False  # the message shown is a status, not a flash
         self._frame_job = None
         self._tick = 0
-
-    def _make_no_activate(self):
-        self.win.update_idletasks()
-        hwnd = user32.GetParent(self.win.winfo_id()) or self.win.winfo_id()
-        ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-        user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
 
     def _create_items(self):
         c = self.canvas
@@ -174,12 +90,13 @@ class Overlay:
         c.coords(self.text, w // 2, h // 2)
 
     def _show_at_caret(self):
-        x, y = caret_screen_pos()
-        x, y = clamp_to_work_area(x, y, self.width, PILL_H)
+        x, y = system.overlay_anchor(self.root, self.width, PILL_H)
+        x, y = system.clamp_to_work_area(self.root, x, y, self.width, PILL_H)
         self.win.geometry(f"{self.width}x{PILL_H}+{x}+{y}")
         self.win.deiconify()
         self.win.attributes("-topmost", True)
         self.win.lift()
+        system.overlay_shown(self.win)
 
     # -- state changes -------------------------------------------------------
 

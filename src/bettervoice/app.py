@@ -1,4 +1,6 @@
-"""BetterVoice: press Win+O to start dictating, Win+O again to stop, Esc to cancel.
+"""BetterVoice: press the hotkey to start dictating, press it again to stop,
+Esc to cancel. The hotkey is Win+O on Windows, ⌃⌥O on macOS and Ctrl+Alt+O
+on Linux.
 
 The transcript is pasted into whatever window/field has focus. Speech is
 recognized locally (Whisper, offline) or by Deepgram, ElevenLabs or an
@@ -9,10 +11,9 @@ Usage (`python -m bettervoice ...` works the same):
     bettervoice --setup     # open the setup wizard again
     bettervoice --test      # record 5 s with the configured engine, print the text
     bettervoice --version
+    bettervoice --toggle    # to the running copy: start or stop (see ipc.py)
 """
 
-import ctypes
-import ctypes.wintypes
 import logging
 import os
 import queue
@@ -21,11 +22,9 @@ import threading
 import time
 import tkinter as tk
 
-import pyperclip
-import pystray
-
-from bettervoice import __version__, autostart, brand, config, stt
+from bettervoice import __version__, autostart, brand, config, ipc, stt
 from bettervoice import overlay as overlay_ui
+from bettervoice.desktop import PasteFallback, system, ui
 from bettervoice.mic import PortAudioError
 from bettervoice.stt.errors import MissingKey, SttError
 from bettervoice.stt.local import ENGINE as LOCAL
@@ -38,156 +37,29 @@ LOG_MAX_BYTES = 1_000_000
 
 
 def setup_logging():
-    """Log to the console, or without one (pythonw / windowed exe) to
-    %APPDATA%\\BetterVoice\\bettervoice.log. Transcripts are never logged."""
-    if sys.stdout is None or sys.stderr is None:
+    """Log to the terminal, or without one (the packaged app, pythonw, a start
+    from the desktop) to config.LOG_PATH. Transcripts are never logged."""
+    stream = sys.stdout
+    if stream is None or sys.stderr is None or not stream.isatty():
         try:
             if os.path.getsize(config.LOG_PATH) > LOG_MAX_BYTES:
                 os.replace(config.LOG_PATH, config.LOG_PATH + ".1")
         except OSError:
             pass
-        log_file = open(config.LOG_PATH, "a", buffering=1, encoding="utf-8")
-        sys.stdout = sys.stdout or log_file
-        sys.stderr = sys.stderr or log_file
+        stream = open(config.LOG_PATH, "a", buffering=1, encoding="utf-8")
+        sys.stdout = sys.stdout or stream  # pythonw has no console at all
+        sys.stderr = sys.stderr or stream
     logging.basicConfig(
         level=logging.INFO,
-        stream=sys.stdout,
+        stream=stream,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     logging.captureWarnings(True)
 
 
-# ------------------------------------------------------------------ paste ---
-
-VK_LWIN, VK_RWIN, VK_CONTROL, VK_V = 0x5B, 0x5C, 0x11, 0x56
-KEYEVENTF_KEYUP = 0x0002
-CLIPBOARD_RESTORE_DELAY = 1.0  # s; give the target app time to read the paste
-
-user32 = ctypes.windll.user32
-
-
-def win_is_down():
-    return any(user32.GetAsyncKeyState(vk) & 0x8000 for vk in (VK_LWIN, VK_RWIN))
-
-
-def wait_for_win_release(timeout=2.0):
-    """The user is likely still holding the Win key from the hotkey press."""
-    deadline = time.time() + timeout
-    while win_is_down() and time.time() < deadline:
-        time.sleep(0.02)
-
-
-def _restore_clipboard(text):
-    try:
-        pyperclip.copy(text)
-    except Exception:
-        pass
-
-
 def paste_text(text):
-    """Paste via clipboard + Ctrl+V, then put the previous clipboard text back.
-
-    Only text can be restored: if the clipboard held something else (e.g. an
-    image), the transcript simply stays on the clipboard.
-    """
-    try:
-        previous = pyperclip.paste()
-    except Exception:
-        previous = ""
-    pyperclip.copy(text)
-    wait_for_win_release()
-    time.sleep(0.05)
-    user32.keybd_event(VK_CONTROL, 0, 0, 0)
-    user32.keybd_event(VK_V, 0, 0, 0)
-    time.sleep(0.02)
-    user32.keybd_event(VK_V, 0, KEYEVENTF_KEYUP, 0)
-    user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
-
-    if previous:
-        timer = threading.Timer(CLIPBOARD_RESTORE_DELAY, _restore_clipboard, (previous,))
-        timer.daemon = True
-        timer.start()
-
-
-# ----------------------------------------------------------------- hotkey ---
-# Win+O is already claimed by Windows itself (rotation lock), so RegisterHotKey
-# fails with ERROR_HOTKEY_ALREADY_REGISTERED. Instead we install a low-level
-# keyboard hook that intercepts the combo before Windows processes it. The
-# hook also turns Esc into "cancel" while a dictation is running.
-
-WH_KEYBOARD_LL = 13
-WM_KEYDOWN = 0x0100
-WM_KEYUP = 0x0101
-WM_SYSKEYDOWN = 0x0104
-WM_SYSKEYUP = 0x0105
-VK_O = 0x4F
-VK_ESCAPE = 0x1B
-VK_DUMMY = 0xFF  # tapped so the Win key release doesn't open the Start menu
-
-LRESULT = ctypes.c_ssize_t
-HookProc = ctypes.WINFUNCTYPE(
-    LRESULT, ctypes.c_int, ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM
-)
-user32.SetWindowsHookExW.restype = ctypes.c_void_p
-user32.UnhookWindowsHookEx.argtypes = [ctypes.c_void_p]
-user32.CallNextHookEx.restype = LRESULT
-user32.CallNextHookEx.argtypes = [
-    ctypes.c_void_p,
-    ctypes.c_int,
-    ctypes.wintypes.WPARAM,
-    ctypes.wintypes.LPARAM,
-]
-
-
-class KBDLLHOOKSTRUCT(ctypes.Structure):
-    _fields_ = [
-        ("vkCode", ctypes.wintypes.DWORD),
-        ("scanCode", ctypes.wintypes.DWORD),
-        ("flags", ctypes.wintypes.DWORD),
-        ("time", ctypes.wintypes.DWORD),
-        ("dwExtraInfo", ctypes.c_size_t),
-    ]
-
-
-_swallowed = set()  # keys whose key-up must be swallowed too
-
-
-def _hook_callback(n_code, w_param, l_param):
-    if n_code == 0:
-        vk = ctypes.cast(l_param, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents.vkCode
-        down = w_param in (WM_KEYDOWN, WM_SYSKEYDOWN)
-        if vk == VK_O and down and win_is_down():
-            if VK_O not in _swallowed:  # ignore key autorepeat
-                _swallowed.add(VK_O)
-                user32.keybd_event(VK_DUMMY, 0, 0, 0)
-                user32.keybd_event(VK_DUMMY, 0, KEYEVENTF_KEYUP, 0)
-                on_hotkey()
-            return 1  # swallow: Windows never sees Win+O
-        if vk == VK_ESCAPE and down and (VK_ESCAPE in _swallowed or cancel()):
-            _swallowed.add(VK_ESCAPE)
-            return 1  # the Esc belonged to us, not to the focused app
-        if not down and vk in _swallowed:
-            _swallowed.discard(vk)
-            return 1
-    return user32.CallNextHookEx(None, n_code, w_param, l_param)
-
-
-def run_hotkey_loop():
-    """Install the keyboard hook and pump messages for it (blocks)."""
-    hook_proc = HookProc(_hook_callback)  # keep a reference so it isn't GC'd
-    hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, hook_proc, None, 0)
-    if not hook:
-        log.error("could not install keyboard hook")
-        ui_q.put(("flash", "Hotkey unavailable", "error"))
-        return
-    log.info("ready: Win+O to dictate, Esc to cancel")
-    msg = ctypes.wintypes.MSG()
-    try:
-        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-            pass  # hook callbacks are delivered while GetMessageW pumps
-    finally:
-        user32.UnhookWindowsHookEx(hook)
+    system.paste(text)
 
 
 # -------------------------------------------------------------- dictation ---
@@ -195,23 +67,31 @@ def run_hotkey_loop():
 ui_q = queue.Queue()  # overlay/tray/window events, handled on the tk main thread
 OVERLAY = None
 TRAY = None
+HOTKEYS = None
 
 state_lock = threading.Lock()
 current = None  # the Dictation in progress, if any
 
 
+def _set_current(dictation):
+    """Change the running dictation (under state_lock)."""
+    global current
+    current = dictation
+    if HOTKEYS is not None:
+        HOTKEYS.dictating(dictation is not None)  # Esc is ours only meanwhile
+
+
 class Dictation:
-    """One dictation: record until Win+O, transcribe, paste."""
+    """One dictation: record until the hotkey, transcribe, paste."""
 
     def __init__(self):
         self.engine = config.get("engine")
         self.language = config.get("language")
         self.stop_requested = threading.Event()
-        self.processing = False  # Win+O was pressed the second time
+        self.processing = False  # the hotkey was pressed the second time
         self.cancelled = False  # Esc
 
     def run(self):
-        global current
         try:
             self._run()
         except MissingKey as e:
@@ -229,7 +109,7 @@ class Dictation:
         finally:
             with state_lock:
                 if current is self:
-                    current = None
+                    _set_current(None)
 
     def _run(self):
         session = stt.create_session(self.engine, self.language, OVERLAY.push_level)
@@ -256,11 +136,15 @@ class Dictation:
                  len(text), time.perf_counter() - started)
         if self.cancelled:
             return
-        if text:
-            paste_text(text)
-            ui_q.put(("hide",))
-        else:
+        if not text:
             ui_q.put(("flash", "No speech recognized", "info"))
+            return
+        try:
+            paste_text(text)
+        except PasteFallback as e:
+            ui_q.put(("flash", e.message, "info"))
+        else:
+            ui_q.put(("hide",))
 
     def _watch_model_loading(self):
         """While the local model is still downloading or loading, show its
@@ -290,13 +174,13 @@ class Dictation:
 
 
 def on_hotkey():
-    """Win+O; called from the keyboard hook, so it must return quickly."""
-    global current
+    """The hotkey; called from the keyboard hook, so it must return quickly."""
     with state_lock:
         if current is None:
-            current = Dictation()
+            dictation = Dictation()
+            _set_current(dictation)
             ui_q.put(("show",))  # instant feedback at the caret
-            threading.Thread(target=current.run, daemon=True).start()
+            threading.Thread(target=dictation.run, daemon=True).start()
         elif not current.processing:
             current.processing = True
             ui_q.put(("processing",))
@@ -306,16 +190,25 @@ def on_hotkey():
 
 def cancel():
     """Esc; True if a dictation was running (the key is then swallowed)."""
-    global current
     with state_lock:
         dictation = current
         if dictation is None:
             return False
         dictation.cancelled = True
         dictation.stop_requested.set()
-        current = None  # a new dictation may start right away
+        _set_current(None)  # a new dictation may start right away
     ui_q.put(("flash", "Cancelled", "info"))
     return True
+
+
+def handle_command(command):
+    """A command from `bettervoice --toggle` & co. (on the command thread)."""
+    if command == "toggle":
+        on_hotkey()
+    elif command == "cancel":
+        cancel()
+    else:  # "settings", "quit"
+        ui_q.put((command,))
 
 
 def sync_engine():
@@ -370,35 +263,26 @@ def status_text():
     return f"{config.engine_label(engine)}: {detail}"
 
 
+_tray_refresh = threading.Event()  # set while a refresh waits in ui_q
+
+
 def refresh_tray():
-    if TRAY is not None:
-        TRAY.title = f"{brand.NAME} – {status_text()}"
-        TRAY.update_menu()
+    """Update the tray's tooltip and menu soon, on the tk thread (AppKit wants
+    the main thread); a burst of calls, e.g. download progress, makes one."""
+    if TRAY is not None and not _tray_refresh.is_set():
+        _tray_refresh.set()
+        ui_q.put(("tray",))
 
 
-IMAGE_ICON, LR_LOADFROMFILE, SM_CXSMICON = 1, 0x10, 49
-user32.LoadImageW.restype = ctypes.c_void_p
-user32.LoadImageW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint,
-                              ctypes.c_int, ctypes.c_int, ctypes.c_uint]
-
-
-class TrayIcon(pystray.Icon):
-    """pystray loads the icon at the large-icon size and Windows shrinks it
-    for the tray, which blurs the mark. Load the ICO's own small frame."""
-
-    def _assert_icon_handle(self):
-        if getattr(self, "_icon_handle", None):
-            return
-        size = user32.GetSystemMetrics(SM_CXSMICON)
-        handle = user32.LoadImageW(None, brand.ICON_PATH, IMAGE_ICON, size, size, LR_LOADFROMFILE)
-        if handle:
-            self._icon_handle = handle
-        else:
-            super()._assert_icon_handle()
+def _refresh_tray_now():
+    _tray_refresh.clear()
+    TRAY.title = f"{brand.NAME} – {status_text()}"
+    TRAY.update_menu()
 
 
 def _choice_menu(setting, options):
     """Radio-button submenu that sets config `setting` to one of `options`."""
+    import pystray
 
     def item(value, label):
         def select(icon, item):
@@ -413,9 +297,11 @@ def _choice_menu(setting, options):
 
 
 def start_tray():
+    import pystray  # here, not at the top: on Linux it connects to the X server
+
     engines = {engine: config.engine_label(engine) for engine in config.ENGINES}
     menu = pystray.Menu(
-        pystray.MenuItem("Win+O to dictate · Esc to cancel", None, enabled=False),
+        pystray.MenuItem(f"{system.HOTKEY} to dictate · Esc to cancel", None, enabled=False),
         pystray.MenuItem(lambda item: status_text(), None, enabled=False),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Recognition", _choice_menu("engine", engines)),
@@ -426,12 +312,12 @@ def start_tray():
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Settings…", lambda icon, item: ui_q.put(("settings",)),
                          default=True),
-        pystray.MenuItem("Open log", lambda icon, item: os.startfile(config.LOG_PATH)),
+        pystray.MenuItem("Open log", lambda icon, item: system.open_path(config.LOG_PATH)),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Quit", lambda icon, item: ui_q.put(("quit",))),
     )
-    icon = TrayIcon("bettervoice", brand.draw_mark(64), f"{brand.NAME} – {status_text()}", menu)
-    threading.Thread(target=icon.run, daemon=True).start()
+    icon = system.make_tray("bettervoice", f"{brand.NAME} – {status_text()}", menu)
+    system.run_tray(icon)
     return icon
 
 
@@ -447,6 +333,7 @@ def open_settings(root, page=None):
 
     if _settings_window is not None and _settings_window.winfo_exists():
         _settings_window.show(page)
+        system.bring_to_front(_settings_window)
         return
 
     def closed():
@@ -454,7 +341,8 @@ def open_settings(root, page=None):
         _settings_window = None
 
     _settings_window = setup_ui.SetupWindow(
-        root, wizard=False, page=page, on_change=settings_changed, on_close=closed
+        root, wizard=False, page=page, on_change=settings_changed, on_close=closed,
+        on_quit=lambda: ui_q.put(("quit",)),  # also where the tray has no menu
     )
 
 
@@ -475,37 +363,6 @@ def apply_setting(root, name, value):
     settings_changed()
 
 
-ERROR_ALREADY_EXISTS = 183
-MB_ICONINFORMATION = 0x40
-kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-kernel32.CreateMutexW.restype = ctypes.c_void_p
-# the second name is the one used before the rename, so an old copy and
-# BetterVoice never run (and grab Win+O) at the same time
-_MUTEX_NAMES = ("BetterVoice.SingleInstance", "DictationWinO_SingleInstance")
-_mutex_handles = []  # held for the lifetime of the process
-
-
-def acquire_single_instance():
-    """False if BetterVoice, or its predecessor, is already running."""
-    for name in _MUTEX_NAMES:
-        _mutex_handles.append(kernel32.CreateMutexW(None, False, name))
-        if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
-            return False
-    return True
-
-
-def _tell_already_running():
-    user32.MessageBoxW(
-        None,
-        f"{brand.NAME} is already running – its icon is in the notification area of the "
-        "taskbar.\n\n"
-        f"If the older version (BetterTalk) is running there, quit it from its icon "
-        f"and start {brand.NAME} again.",
-        brand.NAME,
-        MB_ICONINFORMATION,
-    )
-
-
 # ------------------------------------------------------------------- main ---
 
 
@@ -519,25 +376,28 @@ def _configured_before():
 
 
 def main(force_setup=False):
-    global OVERLAY, TRAY
-    if not acquire_single_instance():
+    global OVERLAY, TRAY, HOTKEYS
+    if not system.acquire_single_instance():
         log.error("%s is already running", brand.NAME)
-        _tell_already_running()
+        if not ipc.send("settings"):  # the running copy shows itself instead
+            system.tell_already_running()
         return
     try:
         autostart.follow_this_copy()
     except OSError as e:
         log.warning("could not update autostart: %s", e)
-    try:  # our own taskbar button and icon, also when started from source
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(brand.APP_USER_MODEL_ID)
-    except (AttributeError, OSError):
-        pass
-    overlay_ui.enable_dpi_awareness()
-    root = tk.Tk()
+    system.prepare_process()
+    root = tk.Tk(className="bettervoice")
     root.withdraw()
-    root.iconbitmap(default=brand.ICON_PATH)  # every window gets the mark
+    ui.attach(root, lambda fn: ui_q.put(("call", fn)))
+    system.init_ui(root, on_reopen=lambda: ui_q.put(("settings",)))
+    commands = ipc.Server(handle_command)
+    try:
+        commands.start()
+    except OSError as e:
+        log.warning("no command channel (bettervoice --toggle): %s", e)
     OVERLAY = overlay_ui.Overlay(root)
-    LOCAL.on_status = lambda: refresh_tray()
+    LOCAL.on_status = refresh_tray
 
     if force_setup or not config.enabled("setup_done"):
         from bettervoice import setup_ui
@@ -550,9 +410,11 @@ def main(force_setup=False):
 
     TRAY = start_tray()
     sync_engine()
-
-    # the keyboard hook needs its own message pump; tk owns the main thread
-    threading.Thread(target=run_hotkey_loop, daemon=True).start()
+    HOTKEYS = system.Hotkeys(on_hotkey, cancel,
+                             on_error=lambda message: ui_q.put(("flash", message, "error")))
+    HOTKEYS.start()
+    if "shortcut" in system.missing_access():  # Wayland: the desktop shortcut is missing
+        ui_q.put(("flash", f"Set up {system.HOTKEY} in Settings → General", "info"))
 
     # windows run their own event loop: open them via after_idle so polling
     # continues meanwhile
@@ -564,6 +426,8 @@ def main(force_setup=False):
         "flash": OVERLAY.flash,
         "settings": lambda page=None: root.after_idle(open_settings, root, page),
         "set": lambda name, value: root.after_idle(apply_setting, root, name, value),
+        "tray": _refresh_tray_now,
+        "call": lambda fn: fn(),
     }
 
     def poll_events():
@@ -573,7 +437,8 @@ def main(force_setup=False):
             except queue.Empty:
                 break
             if event == "quit":
-                TRAY.stop()
+                commands.close()
+                system.stop_tray(TRAY)
                 root.destroy()
                 return
             handlers[event](*args)
@@ -583,15 +448,33 @@ def main(force_setup=False):
     root.mainloop()
 
 
+def self_check():
+    """Load what the app otherwise loads only later: a packaged build that
+    lacks something fails here, in CI, instead of in front of the user."""
+    import ctranslate2  # noqa: F401 - the local engine
+    import faster_whisper  # noqa: F401
+
+    from bettervoice import setup_ui  # noqa: F401
+    from bettervoice.stt import deepgram, elevenlabs, openrouter  # noqa: F401
+    from bettervoice.stt.chunked import warm_up_vad
+
+    warm_up_vad()  # the Silero model and ONNX Runtime
+    system.self_check()
+
+
 def run(argv=None):
-    """Command-line entry point: `bettervoice` / `python -m bettervoice`."""
+    """Start the app (the command line comes through bettervoice.cli)."""
     args = sys.argv[1:] if argv is None else argv
     if "--version" in args:
         print(f"{brand.NAME} {__version__}")
         return
+    if "--check" in args:
+        self_check()
+        print(f"{brand.NAME} {__version__}: ok")
+        return
     config.prepare_data_dir()
     setup_logging()
-    log.info("%s %s", brand.NAME, __version__)
+    log.info("%s %s on %s", brand.NAME, __version__, system.NAME)
     if "--test" in args:
         run_test()
     else:

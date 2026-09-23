@@ -2,7 +2,7 @@
 
 
 class SttError(Exception):
-    """Recognition failed; `message` is shown to the user (German, short)."""
+    """Recognition failed; `message` is shown to the user (short)."""
 
     def __init__(self, message, detail=None):
         super().__init__(f"{message} ({detail})" if detail else message)

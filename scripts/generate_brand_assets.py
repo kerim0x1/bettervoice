@@ -5,7 +5,8 @@
 Writes:
     assets/bettervoice-mark.svg          vector master (docs, web)
     assets/bettervoice-mark.png          512 px (README, social)
-    src/bettervoice/assets/icon.ico      app, window, tray and exe icon
+    src/bettervoice/assets/icon.ico      Windows: app, window, tray and exe icon
+    src/bettervoice/assets/icon.png      macOS and Linux: window icon, 256 px
 
 Each ICO size is rendered on its own (small ones pixel-snapped) instead of
 being scaled down from one large image, so 16-40 px icons stay crisp.
@@ -49,8 +50,10 @@ def main():
     os.makedirs(os.path.dirname(brand.ICON_PATH), exist_ok=True)
     with open(brand.ICON_PATH, "wb") as f:
         f.write(encode_ico([brand.draw_mark(size) for size in brand.ICON_SIZES]))
+    brand.draw_mark(256).save(brand.ICON_PNG_PATH, optimize=True)
     for path in ("assets/bettervoice-mark.svg", "assets/bettervoice-mark.png",
-                 os.path.relpath(brand.ICON_PATH, ROOT)):
+                 os.path.relpath(brand.ICON_PATH, ROOT),
+                 os.path.relpath(brand.ICON_PNG_PATH, ROOT)):
         print(f"wrote {path} ({os.path.getsize(os.path.join(ROOT, path)):,} bytes)")
 
 

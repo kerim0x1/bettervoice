@@ -22,8 +22,9 @@ Do not commit virtual environments, build output, downloaded models, `.env` file
 - Raise `SttError` with a short, user-facing message for anything the user should see; put technical detail in the second argument, which goes to the log.
 - Never log or send what the user dictated, beyond the chosen engine.
 - Touch tkinter only from the main thread. Background work reports back through the existing queues.
+- Keep system-specific code in `src/bettervoice/desktop/` (`windows.py`, `macos.py`, `linux.py`, behind the interface in `desktop/__init__.py`). Test it on the systems you change; CI runs the tests on all three.
 - Take names, colors, and the mark from `bettervoice.brand`; regenerate the icons with `scripts/generate_brand_assets.py` instead of editing them.
-- After changing `packaging/` or `scripts/build.py`, build the installer with `python scripts/build.py --installer` (needs Inno Setup) and install and uninstall it once.
+- After changing `packaging/` or `scripts/build.py`, build on the systems you touched: on Windows `python scripts/build.py --installer` (needs Inno Setup), then install and uninstall once; on macOS and Linux `python scripts/build.py`, then start the result with `--check`.
 - Update the user-facing guides when setup, behavior, or data handling changes, and add an entry to [CHANGELOG.md](CHANGELOG.md).
 
 ## Pull requests

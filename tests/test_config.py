@@ -1,4 +1,8 @@
 import os
+import stat
+import sys
+
+import pytest
 
 from bettervoice import config
 
@@ -64,3 +68,19 @@ def test_join_transcripts():
     assert config.join_transcripts(["你好。", "今天天气很好。"]) == "你好。今天天气很好。"
     assert config.join_transcripts(["これはテストです。", "OK"]) == "これはテストです。OK"
     assert config.join_transcripts([]) == ""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="%APPDATA% is private on Windows")
+def test_the_settings_file_is_private(settings):
+    settings.set("openrouter_key", "sk-or-1")
+    assert stat.S_IMODE(os.stat(settings.CONFIG_ENV).st_mode) == 0o600
+
+
+def test_folders_follow_the_system():
+    assert config.CONFIG_ENV.startswith(config.CONFIG_DIR)
+    assert config.MODELS_DIR.startswith(config.DATA_DIR)
+    assert config.LOG_PATH.startswith(config.LOG_DIR)
+    if sys.platform == "darwin":
+        assert "Application Support" in config.CONFIG_DIR and "Logs" in config.LOG_DIR
+    elif sys.platform != "win32" and not os.environ.get("XDG_CONFIG_HOME"):
+        assert config.CONFIG_DIR.endswith(os.path.join(".config", "bettervoice"))

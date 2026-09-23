@@ -17,13 +17,17 @@ sys.path.insert(0, os.path.join(ROOT, "src"))
 
 from bettervoice import __version__, brand  # noqa: E402
 
-DOWNLOADS = (  # (file name suffix, who it is for)
-    ("-setup.exe", "**Most PCs.** Installs {name} for your Windows account; no administrator "
-                   "rights needed."),
-    ("-cuda-setup.exe", "PCs with an NVIDIA graphics card: offline recognition runs on the GPU. "
-                        "A larger download."),
-    (".zip", "Use without installing: unzip, then start `{name}.exe`."),
-    ("-cuda.zip", "The same, with GPU support for NVIDIA graphics cards."),
+DOWNLOADS = (  # (system, file name after "BetterVoice-<version>-", who it is for)
+    ("Windows", "win-x64-setup.exe",
+     "**Most PCs.** Installs {name} for your Windows account; no administrator rights needed."),
+    ("Windows", "win-x64-cuda-setup.exe",
+     "PCs with an NVIDIA graphics card: offline recognition runs on the GPU. A larger download."),
+    ("Windows", "win-x64.zip", "Use without installing: unzip, then start `{name}.exe`."),
+    ("Windows", "win-x64-cuda.zip", "The same, with GPU support for NVIDIA graphics cards."),
+    ("macOS", "macos-arm64.dmg", "Macs with Apple silicon (M1 and newer)."),
+    ("macOS", "macos-x64.dmg", "Macs with an Intel processor."),
+    ("Linux", "linux-x64.tar.gz",
+     "64-bit Linux with X11 or Wayland: unpack, then run `./install.sh` for the app menu."),
 )
 
 
@@ -37,22 +41,26 @@ def changelog_entry(version, text):
 def notes(version, entry, dist=None):
     base = f"{brand.REPO_URL}/releases/download/v{version}"
     rows = []
-    for suffix, purpose in DOWNLOADS:
-        name = f"{brand.NAME}-{version}-win-x64{suffix}"
+    for system, suffix, purpose in DOWNLOADS:
+        name = f"{brand.NAME}-{version}-{suffix}"
         path = os.path.join(dist, name) if dist else None
         size = f" ({os.path.getsize(path) / 1e6:.0f} MB)" if path and os.path.exists(path) else ""
-        rows.append(f"| [{name}]({base}/{name}){size} | {purpose.format(name=brand.NAME)} |")
+        rows.append(f"| {system} | [{name}]({base}/{name}){size} | "
+                    f"{purpose.format(name=brand.NAME)} |")
     return "\n".join([
         entry,
         "",
         "### Downloads",
         "",
-        "| File | Choose it for |",
-        "| --- | --- |",
+        "| System | File | Choose it for |",
+        "| --- | --- | --- |",
         *rows,
         "",
-        f"For Windows 10 and 11, 64-bit. {brand.NAME} is not code-signed yet: if SmartScreen "
-        "warns about an unrecognized app, choose **More info → Run anyway**. "
+        f"Windows 10 and 11, macOS 12 and newer, and 64-bit Linux. {brand.NAME} is not "
+        "code-signed yet: on Windows, if SmartScreen warns about an unrecognized app, choose "
+        "**More info → Run anyway**; on macOS, open the app once with a right-click and "
+        "**Open** (or allow it under **System Settings → Privacy & Security**). On Linux it "
+        "needs PortAudio (`libportaudio2`). "
         f"[SHA256SUMS.txt]({base}/SHA256SUMS.txt) lists the checksum of every file.",
         "",
     ])

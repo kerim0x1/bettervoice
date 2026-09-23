@@ -18,15 +18,15 @@ runs:
     - name: Start the app
       shell: pwsh
       run: |
-        # --version returns at once; a module missing from the build would
-        # stop the app with an error dialog instead
-        $app = Start-Process dist/BetterVoice/BetterVoice.exe -ArgumentList "--version" -PassThru
+        # --check loads every part of the app and returns; a module missing
+        # from the build would stop it with an error dialog instead
+        $app = Start-Process dist/BetterVoice/BetterVoice.exe -ArgumentList "--check" -PassThru
         $null = $app.Handle  # keeps the exit code readable
-        if (-not $app.WaitForExit(60000)) {
+        if (-not $app.WaitForExit(120000)) {
           $app.Kill()
-          throw "BetterVoice.exe --version did not exit"
+          throw "BetterVoice.exe --check did not exit"
         }
-        if ($app.ExitCode -ne 0) { throw "BetterVoice.exe --version exited with $($app.ExitCode)" }
+        if ($app.ExitCode -ne 0) { throw "BetterVoice.exe --check exited with $($app.ExitCode)" }
 
     - name: Install and uninstall
       shell: pwsh
@@ -38,6 +38,7 @@ runs:
         $shortcut = Join-Path ([Environment]::GetFolderPath("Programs")) "BetterVoice.lnk"
 
         # "Start with Windows" of an unzipped copy: the installation takes it over
+        if (-not (Test-Path $run)) { New-Item -Path $run -Force | Out-Null }
         Set-ItemProperty $run -Name BetterVoice -Value '"C:\Unzipped\BetterVoice\BetterVoice.exe"'
         $install = Start-Process $setup -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES",
           "/NORESTART", "/DIR=$dir", "/LOG=$log" -Wait -PassThru

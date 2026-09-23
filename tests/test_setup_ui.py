@@ -7,6 +7,7 @@ import tkinter as tk
 import pytest
 
 from bettervoice import autostart, brand, config, setup_ui
+from bettervoice.desktop import system
 from bettervoice.stt import local, openrouter
 
 
@@ -100,3 +101,23 @@ def test_switching_cards_quickly(ui):
     for engine in (config.LOCAL, config.DEEPGRAM, config.LOCAL, config.OPENROUTER):
         settings.select_engine(engine)
     pump(settings, rounds=30)
+
+
+def test_the_access_step_only_when_needed(ui, monkeypatch):
+    monkeypatch.setattr(system, "missing_access", lambda: [])
+    assert "access" not in ui(wizard=True).steps
+    monkeypatch.setattr(system, "missing_access", lambda: ["accessibility"])
+    wizard = ui(wizard=True)
+    assert wizard.steps[-2:] == ["access", "done"]
+    wizard.show("language")
+    wizard._next()
+    pump(wizard)
+    assert wizard.page == "access"
+
+
+def test_the_keyboard_section_in_the_settings(ui, monkeypatch):
+    monkeypatch.setattr(setup_ui, "hotkey_needs_setup", lambda: True)
+    settings = ui(wizard=False)
+    settings.show("general")
+    pump(settings, rounds=30)
+    assert settings.access_status.winfo_exists()

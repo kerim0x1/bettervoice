@@ -4,7 +4,7 @@ BetterVoice's source is released under the MIT License in [`LICENSE`](LICENSE). 
 
 ## Components in the Windows app
 
-The installers and zip archives bundle these packages and runtimes. License identifiers are taken from each package's own metadata at the time of the 0.1 release; the installed packages' notices remain authoritative.
+The downloads bundle these packages and runtimes. License identifiers are taken from each package's own metadata at the time of the 0.1 release; the installed packages' notices remain authoritative.
 
 | Component | Used for | License |
 | --- | --- | --- |
@@ -27,9 +27,13 @@ The installers and zip archives bundle these packages and runtimes. License iden
 | [tqdm](https://github.com/tqdm/tqdm) | Used by the Hugging Face client | MPL-2.0 AND MIT |
 | [certifi](https://github.com/certifi/python-certifi) | Trusted certificates for HTTPS | MPL-2.0 |
 | [OpenSSL](https://www.openssl.org/), [libffi](https://sourceware.org/libffi/), [zlib](https://zlib.net/), [SQLite](https://sqlite.org/) | Parts of the Python runtime | Apache-2.0, MIT, Zlib, public domain |
-| Microsoft Visual C++ runtime | Parts of the Python runtime | Microsoft redistributable terms |
+| Microsoft Visual C++ runtime | Parts of the Python runtime (Windows) | Microsoft redistributable terms |
+| [PyObjC](https://github.com/ronaldoussoren/pyobjc) (Cocoa, Quartz, ApplicationServices) | The hotkey, pasting, and the menu bar on macOS | MIT |
+| [python-xlib](https://github.com/python-xlib/python-xlib) | The hotkey, pasting, and the pill's shape on Linux | LGPL-2.1-or-later |
 
-**pystray** is licensed under the GNU LGPL 3.0. Its unmodified source is available from its [repository](https://github.com/moses-palmer/pystray). You can replace it with a modified version by installing that version and rebuilding the app with `scripts/build.py`; the complete build setup is part of this repository.
+**pystray** is licensed under the GNU LGPL 3.0 and **python-xlib** under the GNU LGPL 2.1 or later. Their unmodified sources are available from their repositories ([pystray](https://github.com/moses-palmer/pystray), [python-xlib](https://github.com/python-xlib/python-xlib)). You can replace either with a modified version by installing that version and rebuilding the app with `scripts/build.py`; the complete build setup is part of this repository.
+
+On Linux, BetterVoice uses the system's PortAudio library (`libportaudio2`, MIT) and, with an NVIDIA GPU, the system's CUDA libraries; the Linux download contains neither.
 
 The release workflow builds with the dependency versions available at build time; each release's files contain the exact packages they were built with.
 

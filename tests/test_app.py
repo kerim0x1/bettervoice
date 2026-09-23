@@ -1,6 +1,5 @@
 """The dictation flow in bettervoice.app: hotkey, Esc, errors, paste."""
 
-import ctypes
 import queue
 import threading
 import time
@@ -9,6 +8,7 @@ import types
 import pytest
 
 from bettervoice import app as bv
+from bettervoice.desktop import PasteFallback
 from bettervoice.stt.errors import MissingKey, SttError
 
 
@@ -50,6 +50,9 @@ def app(monkeypatch, settings):
     monkeypatch.setattr(bv.stt, "create_session", create_session)
     monkeypatch.setattr(bv.stt, "polish", lambda text, engine: text)
     monkeypatch.setattr(bv, "current", None)
+    ns.escape_grabs = []  # what the hotkey backend was told about Esc
+    monkeypatch.setattr(bv, "HOTKEYS",
+                        types.SimpleNamespace(dictating=ns.escape_grabs.append))
     settings.set("engine", "deepgram")
 
     def events():
@@ -144,30 +147,35 @@ def test_empty_result(app):
     assert ("flash", "No speech recognized") in app.events()
 
 
-def test_keyboard_hook(monkeypatch):
-    pressed, cancels = [], []
-    user32 = types.SimpleNamespace(keybd_event=lambda *a: None,
-                                   CallNextHookEx=lambda *a: 0)
-    monkeypatch.setattr(bv, "user32", user32)
-    monkeypatch.setattr(bv, "win_is_down", lambda: True)
-    monkeypatch.setattr(bv, "on_hotkey", lambda: pressed.append(1))
-    active = [False]
-    monkeypatch.setattr(bv, "cancel", lambda: cancels.append(1) or active[0])
-    monkeypatch.setattr(bv, "_swallowed", set())
+def test_esc_belongs_to_a_running_dictation_only(app):
+    start(app)
+    bv.on_hotkey()
+    assert app.wait_idle()
+    assert app.escape_grabs == [True, False]
 
-    def key(vk, down):
-        info = bv.KBDLLHOOKSTRUCT(vkCode=vk)
-        message = bv.WM_KEYDOWN if down else bv.WM_KEYUP
-        return bv._hook_callback(0, message, ctypes.addressof(info))
 
-    # Win+O: swallowed down and up, autorepeat doesn't trigger again
-    assert key(bv.VK_O, True) == 1 and key(bv.VK_O, True) == 1
-    assert key(bv.VK_O, False) == 1
-    assert pressed == [1]
-    # Esc with nothing running goes to the focused app
-    assert key(bv.VK_ESCAPE, True) == 0 and key(bv.VK_ESCAPE, False) == 0
-    # Esc during a dictation is ours, including its key-up
-    active[0] = True
-    assert key(bv.VK_ESCAPE, True) == 1 and key(bv.VK_ESCAPE, False) == 1
-    # other keys pass through
-    assert key(0x41, True) == 0
+def test_text_that_cant_be_typed_stays_on_the_clipboard(app, monkeypatch):
+    def paste(text):
+        raise PasteFallback("Copied – press Ctrl+V to paste")
+
+    monkeypatch.setattr(bv, "paste_text", paste)
+    start(app)
+    bv.on_hotkey()
+    assert app.wait_idle()
+    events = app.events()
+    assert ("flash", "Copied – press Ctrl+V to paste") in events and ("hide",) not in events
+
+
+def test_commands_from_a_second_start(app):
+    bv.handle_command("toggle")  # like the hotkey...
+    deadline = time.time() + 2
+    while not app.sessions and time.time() < deadline:
+        time.sleep(0.01)
+    session = app.sessions[-1]
+    session.started.wait(2)
+    bv.handle_command("cancel")  # ...and like Esc
+    assert app.wait_idle() and session.aborted
+    bv.handle_command("settings")
+    bv.handle_command("quit")
+    events = app.events()
+    assert ("settings",) in events and ("quit",) in events

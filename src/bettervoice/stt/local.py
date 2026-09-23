@@ -10,6 +10,7 @@ import glob
 import json
 import logging
 import os
+import sys
 import threading
 import time
 import urllib.request
@@ -36,38 +37,63 @@ MODEL_REPOS = {
 }
 _MODEL_FILES = ("config.json", "preprocessor_config.json", "model.bin", "tokenizer.json")
 
-# the GPU needs cuBLAS 12 (pip install nvidia-cublas-cu12); CTranslate2
-# ships the rest itself
-_CUDA_DLLS = ("cublas64_12.dll", "cublasLt64_12.dll")
+# the GPU needs CUDA 12's cuBLAS (pip install nvidia-cublas-cu12); on Windows
+# CTranslate2 ships the rest itself, on Linux it also needs cuDNN 9
+if sys.platform == "win32":
+    _CUDA_LIBS = ("cublas64_12.dll", "cublasLt64_12.dll")
+else:
+    _CUDA_LIBS = ("libcublas.so.12", "libcublasLt.so.12", "libcudnn.so.9")
 
 
 # ------------------------------------------------------------------- GPU ---
 
 
 def _cuda_dll_dirs():
-    """Folders that may hold the NVIDIA DLLs, besides what's on PATH."""
-    # a "cuda" folder next to BetterVoice.exe or in the data folder
-    dirs = [os.path.join(config.APP_DIR, "cuda"), os.path.join(config.CONFIG_DIR, "cuda")]
+    """Folders that may hold NVIDIA's libraries, besides the system's."""
+    # a "cuda" folder next to the app or in the data folder
+    dirs = [os.path.join(config.APP_DIR, "cuda"), os.path.join(config.DATA_DIR, "cuda")]
     try:
         import nvidia  # pip install nvidia-cublas-cu12
 
         for base in nvidia.__path__:
-            dirs += glob.glob(os.path.join(base, "*", "bin"))
+            dirs += glob.glob(os.path.join(base, "*", "bin" if sys.platform == "win32" else "lib"))
     except ImportError:
         pass
     return [d for d in dirs if os.path.isdir(d)]
 
 
+def _load_globally(name):
+    """Load a CUDA library for CTranslate2: it then finds it by name."""
+    for folder in _cuda_dll_dirs():
+        path = os.path.join(folder, name)
+        if os.path.exists(path):
+            try:
+                ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
+                return True
+            except OSError as e:
+                log.info("could not load %s: %s", path, e)
+    try:
+        ctypes.CDLL(name, mode=ctypes.RTLD_GLOBAL)  # installed system-wide
+        return True
+    except OSError:
+        return False
+
+
 def gpu_status():
-    """"ok", "no_cublas" (NVIDIA GPU but cuBLAS missing) or "none"."""
+    """"ok", "no_cublas" (NVIDIA GPU but CUDA libraries missing) or "none"."""
+    if sys.platform == "darwin":
+        return "none"  # CTranslate2 has no Metal backend: the CPU it is
     import ctranslate2
 
     if ctranslate2.get_cuda_device_count() == 0:
         return "none"
-    for d in _cuda_dll_dirs():
-        if d not in os.environ["PATH"]:  # CTranslate2 looks the DLLs up via PATH
-            os.environ["PATH"] = d + os.pathsep + os.environ["PATH"]
-    missing = [dll for dll in _CUDA_DLLS if ctypes.util.find_library(dll) is None]
+    if sys.platform == "win32":
+        for d in _cuda_dll_dirs():
+            if d not in os.environ["PATH"]:  # CTranslate2 looks the DLLs up via PATH
+                os.environ["PATH"] = d + os.pathsep + os.environ["PATH"]
+        missing = [lib for lib in _CUDA_LIBS if ctypes.util.find_library(lib) is None]
+    else:
+        missing = [lib for lib in _CUDA_LIBS if not _load_globally(lib)]
     if missing:
         log.info("GPU found, but not %s: using the CPU", ", ".join(missing))
         return "no_cublas"

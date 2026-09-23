@@ -1,7 +1,8 @@
 """Setup wizard (first start) and settings window.
 
 customtkinter on top of the app's hidden tk root, styled like the overlay:
-near-black surfaces, warm off-white ink, Segoe UI Variable and Fluent icons.
+near-black surfaces, warm off-white ink, the system's font (Segoe UI Variable
+and its Fluent icons on Windows; symbols from the text font elsewhere).
 Settings are saved as soon as they're valid; background work (key checks,
 model list, GPU detection) reports back through a queue polled on the tk
 thread, since tkinter must only be touched from there.
@@ -11,13 +12,27 @@ import os
 import queue
 import sys
 import threading
+import time
+import tkinter as tk
+import tkinter.font as tkfont
 import webbrowser
 
 import customtkinter as ctk
 
 from bettervoice import __version__, autostart, brand, config, stt
 from bettervoice.brand import draw_mark
+from bettervoice.desktop import system
 from bettervoice.stt import local
+
+if tk.TkVersion >= 9:
+    # Tk 9 answers "" for an empty menu's index; tkinter before Python 3.13 fails
+    # on that, e.g. in customtkinter's combo box menus
+
+    def _menu_index(self, index):
+        i = self.tk.call(self._w, "index", index)
+        return None if i in ("", "none") else self.tk.getint(i)
+
+    tk.Menu.index = _menu_index
 
 # ---------------------------------------------------------------- design ---
 
@@ -38,11 +53,7 @@ SUCCESS = "#7bd88f"
 ERROR = "#ff6b7a"
 WARNING = "#f5c26b"
 
-DISPLAY = "Segoe UI Variable Display"
-BODY = "Segoe UI Variable Text"
-ICON_FONT = "Segoe Fluent Icons"
-
-ICONS = {
+FLUENT_ICONS = {  # Segoe Fluent Icons, Windows 11
     config.LOCAL: "\ue7f4",
     config.DEEPGRAM: "\ue945",
     config.ELEVENLABS: "\ue9d9",
@@ -66,9 +77,34 @@ ICONS = {
     "back": "\ue72b",
     "next": "\ue72a",
 }
+SYMBOL_ICONS = {  # elsewhere: symbols most text fonts have (no emoji: tk 8.6 can't)
+    config.LOCAL: "\u2302",  # house
+    config.DEEPGRAM: "\u223f",  # sine wave
+    config.ELEVENLABS: "\u25ce",  # bullseye
+    config.OPENROUTER: "\u21c4",  # arrows
+    "mic": "\u25c9",
+    "globe": "\u2295",
+    "lock": "\u2601",  # cloud: "local or in the cloud"
+    "check": "\u2713",
+    "cross": "\u2715",
+    "warning": "\u26a0",
+    "download": "\u2193",
+    "keyboard": "\u2318" if sys.platform == "darwin" else "\u2387",  # Mac: Command key
+    "power": "\u21bb",
+    "pencil": "\u270e",
+    "link": "\u2197",
+    "eye": "\u25d0",
+    "gear": "\u2699",
+    "doc": "\u2263",
+    "info": "\u2139",
+    "clock": "\u25f7",
+    "back": "\u2190",
+    "next": "\u2192",
+}
+ICONS = FLUENT_ICONS if system.ICON_FONT else SYMBOL_ICONS
 
 ENGINE_CARDS = {
-    config.LOCAL: ("Local", "Runs offline on your PC. Free and private.",
+    config.LOCAL: ("Local", f"Runs offline on your {system.COMPUTER}. Free and private.",
                    ("Offline", "Free")),
     config.DEEPGRAM: ("Deepgram", "Live in the cloud – your text is ready instantly.",
                       ("Live", "Very fast")),
@@ -78,7 +114,7 @@ ENGINE_CARDS = {
                         ("AI", "Flexible")),
 }
 
-WIZARD_STEPS = ("welcome", "engine", "setup", "language", "done")
+WIZARD_STEPS = ("welcome", "engine", "setup", "language", "access", "done")
 SETTINGS_PAGES = (
     ("engine", "Recognition", ICONS["mic"]),
     ("language", "Language", ICONS["globe"]),
@@ -106,6 +142,16 @@ def badge(master, ui, glyph, size, icon_size, fg, text_color, radius=None):
                  fg_color="transparent", width=inner, height=inner).place(
         relx=0.5, rely=0.5, anchor="center")
     return frame
+
+
+def hotkey_needs_setup():
+    """macOS needs a permission for the hotkey, Wayland a desktop shortcut."""
+    return sys.platform == "darwin" or (system.NAME == "Linux" and system.is_wayland())
+
+
+def tk_default_family(widget):
+    """The family of tk's default font: the system's own UI font."""
+    return tkfont.nametofont("TkDefaultFont", root=widget).actual("family")
 
 
 def _pointer_inside(widget):
@@ -234,7 +280,7 @@ class KeyPanel(ctk.CTkFrame):
             self.checked_key = saved
             self.status.set("ok", "Saved")
         else:
-            self.status.set("info", "Stored only on this PC.")
+            self.status.set("info", f"Stored only on this {system.COMPUTER}.")
         self.entry.bind("<Return>", lambda e: self.check())
 
     @property
@@ -360,12 +406,10 @@ class LocalPanel(ctk.CTkFrame):
         self.gpu = status = status or "none"  # None: the detection itself failed
         if status == "ok":
             self.device.set("ok", "NVIDIA GPU detected – recognition runs on the GPU.")
-        elif status == "no_cublas" and getattr(sys, "frozen", False):
-            self.device.set("warning", "NVIDIA GPU found, but this edition runs on the CPU – "
-                                       "install the CUDA edition to use the GPU.")
         elif status == "no_cublas":
-            self.device.set("warning", "NVIDIA GPU found, but cuBLAS is missing – running on "
-                                       "the CPU (pip install nvidia-cublas-cu12).")
+            self.device.set("warning", gpu_hint())
+        elif sys.platform == "darwin":
+            self.device.set("info", "Recognition runs on the processor.")
         else:
             self.device.set("info", "No NVIDIA GPU – recognition runs on the CPU.")
         self.refresh()
@@ -405,22 +449,47 @@ class LocalPanel(ctk.CTkFrame):
             self.model.set("info", f"{name} ({size}) is downloaded once.")
 
 
+def gpu_hint():
+    """What to install when there is an NVIDIA GPU but no CUDA libraries."""
+    frozen = getattr(sys, "frozen", False)
+    if sys.platform == "win32" and frozen:
+        return ("NVIDIA GPU found, but this edition runs on the CPU – install the CUDA "
+                "edition to use the GPU.")
+    if sys.platform == "win32":
+        return ("NVIDIA GPU found, but cuBLAS is missing – running on the CPU "
+                "(pip install nvidia-cublas-cu12).")
+    if frozen:
+        return ("NVIDIA GPU found, but CUDA 12's cuBLAS and cuDNN 9 are missing – "
+                "running on the CPU.")
+    return ("NVIDIA GPU found, but cuBLAS or cuDNN is missing – running on the CPU "
+            "(pip install nvidia-cublas-cu12 nvidia-cudnn-cu12).")
+
+
 # ---------------------------------------------------------------- window ---
 
 
 class SetupWindow(ctk.CTkToplevel):
     """wizard=True: first-start setup in steps; False: settings with a sidebar."""
 
-    def __init__(self, master, wizard, page=None, on_change=None, on_close=None):
+    def __init__(self, master, wizard, page=None, on_change=None, on_close=None,
+                 on_quit=None):
         ctk.set_appearance_mode("dark")
         super().__init__(master, fg_color=BG)
         self.wizard = wizard
+        # the steps of this wizard: keyboard access only where it's still missing
+        self.steps = [step for step in WIZARD_STEPS
+                      if step != "access" or system.missing_access()]
+        default = tk_default_family(self)
+        self.display_family = system.DISPLAY_FONT or default
+        self.text_family = system.TEXT_FONT or default
+        self.icon_family = system.ICON_FONT or default
         width, height = (840, 640) if wizard else (920, 660)
         self.text_width = width - 72 if wizard else width - 210 - 72
         # an engine card's text column: half the body minus icon, check, padding
         self.card_text_width = (self.text_width - 16) // 2 - 120
         self.on_change = on_change or (lambda: None)
         self.on_close = on_close
+        self.on_quit = on_quit
         self.engine = config.get("engine")  # the card selected in the UI
         self.page = None
         self.panel = None  # the KeyPanel / LocalPanel on screen, if any
@@ -435,28 +504,28 @@ class SetupWindow(ctk.CTkToplevel):
         y = (self.winfo_screenheight() - height) // 3
         self.geometry(f"{width}x{height}+{x}+{y}")
         self.protocol("WM_DELETE_WINDOW", self.close)
-        self.iconbitmap(brand.ICON_PATH)
+        system.set_window_icon(self)
 
         self.logo = ctk.CTkImage(draw_mark(160), size=(40, 40))
         self.autostart_on = ctk.BooleanVar(value=True if wizard else autostart.is_enabled())
         self._build_frame()
         self.show(page or ("welcome" if wizard else "engine"))
         self._poll()
-        self.lift()
         self.attributes("-topmost", True)
         self.after(400, lambda: self.attributes("-topmost", False))
-        self.focus_force()
+        system.bring_to_front(self)
 
     # -- helpers -------------------------------------------------------------
 
-    def font(self, size, weight="normal", family=BODY):
+    def font(self, size, weight="normal", family=None):
+        family = family or self.text_family
         key = (size, weight, family)
         if key not in self._fonts:
             self._fonts[key] = ctk.CTkFont(family=family, size=round(size), weight=weight)
         return self._fonts[key]
 
     def icon(self, size):
-        return self.font(size, family=ICON_FONT)
+        return self.font(size, family=self.icon_family)
 
     def run_async(self, work, callback):
         """work() on a thread, then callback(result) on the tk thread."""
@@ -479,6 +548,7 @@ class SetupWindow(ctk.CTkToplevel):
             except queue.Empty:
                 break
             callback(result)
+        self._refresh_access()
         if isinstance(self.panel, LocalPanel):
             self.panel.refresh()
             if self.wizard and self.page == "setup" and self.panel.gpu is not None:
@@ -505,7 +575,7 @@ class SetupWindow(ctk.CTkToplevel):
                              text_color=MUTED, font=self.font(13.5))
 
     def _heading(self, title, subtitle=None):
-        ctk.CTkLabel(self.body, text=title, font=self.font(24, "bold", DISPLAY),
+        ctk.CTkLabel(self.body, text=title, font=self.font(24, "bold", self.display_family),
                      text_color=TEXT, anchor="w").pack(fill="x")
         if subtitle:
             ctk.CTkLabel(self.body, text=subtitle, font=self.font(13.5), text_color=MUTED,
@@ -541,7 +611,8 @@ class SetupWindow(ctk.CTkToplevel):
             header = ctk.CTkFrame(self, fg_color="transparent", height=76)
             header.pack(fill="x", padx=36, pady=(22, 0))
             ctk.CTkLabel(header, image=self.logo, text="").pack(side="left")
-            ctk.CTkLabel(header, text=brand.NAME, font=self.font(17, "bold", DISPLAY),
+            ctk.CTkLabel(header, text=brand.NAME,
+                         font=self.font(17, "bold", self.display_family),
                          text_color=TEXT).pack(side="left", padx=12)
             self.dots = ctk.CTkFrame(header, fg_color="transparent")
             self.dots.pack(side="right")
@@ -553,7 +624,8 @@ class SetupWindow(ctk.CTkToplevel):
             header = ctk.CTkFrame(sidebar, fg_color="transparent")
             header.pack(fill="x", padx=20, pady=(26, 26))
             ctk.CTkLabel(header, image=self.logo, text="").pack(side="left")
-            ctk.CTkLabel(header, text=brand.NAME, font=self.font(16, "bold", DISPLAY),
+            ctk.CTkLabel(header, text=brand.NAME,
+                         font=self.font(16, "bold", self.display_family),
                          text_color=TEXT).pack(side="left", padx=10)
             self.nav = {}
             for page, label, icon in SETTINGS_PAGES:
@@ -566,7 +638,8 @@ class SetupWindow(ctk.CTkToplevel):
             ctk.CTkLabel(sidebar, text=f"Version {__version__}", font=self.font(11.5),
                          text_color=FAINT, anchor="w").pack(side="bottom", fill="x", padx=24,
                                                            pady=(4, 22))
-            ctk.CTkLabel(sidebar, text="Win+O  dictate\nEsc  cancel", font=self.font(12),
+            ctk.CTkLabel(sidebar, text=f"{system.HOTKEY}  dictate\nEsc  cancel",
+                         font=self.font(12),
                          text_color=MUTED, justify="left", anchor="w").pack(
                 side="bottom", fill="x", padx=24)
             content = ctk.CTkFrame(self, fg_color="transparent")
@@ -601,8 +674,9 @@ class SetupWindow(ctk.CTkToplevel):
     def _draw_dots(self):
         for dot in self.dots.winfo_children():
             dot.destroy()
-        step = WIZARD_STEPS.index(self.page)
-        for i in range(len(WIZARD_STEPS)):
+        steps = self.steps if self.page in self.steps else WIZARD_STEPS
+        step = steps.index(self.page)
+        for i in range(len(steps)):
             ctk.CTkFrame(self.dots, width=22 if i == step else 8, height=8, corner_radius=4,
                          fg_color=ACCENT if i <= step else SELECTED).pack(side="left", padx=3)
 
@@ -615,11 +689,11 @@ class SetupWindow(ctk.CTkToplevel):
         self.next_button.pack(side="right")
 
     def _next(self):
-        steps = WIZARD_STEPS
+        steps = self.steps if self.page in self.steps else WIZARD_STEPS
         self.show(steps[steps.index(self.page) + 1])
 
     def _back(self):
-        steps = WIZARD_STEPS
+        steps = self.steps if self.page in self.steps else WIZARD_STEPS
         self.show(steps[steps.index(self.page) - 1])
 
     # -- pages ---------------------------------------------------------------
@@ -630,12 +704,14 @@ class SetupWindow(ctk.CTkToplevel):
         features = ctk.CTkFrame(self.body, fg_color="transparent")
         features.pack(fill="x", pady=(34, 0))
         for icon, title, text in (
-            (ICONS["keyboard"], "Press Win+O and start talking",
-             "Press Win+O again – your text appears where your cursor is. Esc cancels."),
+            (ICONS["keyboard"], f"Press {system.HOTKEY} and start talking",
+             f"Press {system.HOTKEY} again – your text appears where your cursor is. "
+             "Esc cancels."),
             (ICONS["globe"], "Understands how you speak",
              "English, German, French and ten more languages – also detected automatically."),
             (ICONS["lock"], "Local or in the cloud",
-             "Offline on your PC – or with Deepgram, ElevenLabs and OpenRouter."),
+             f"Offline on your {system.COMPUTER} – or with Deepgram, ElevenLabs and "
+             "OpenRouter."),
         ):
             row = ctk.CTkFrame(features, fg_color="transparent")
             row.pack(fill="x", pady=8)
@@ -651,7 +727,7 @@ class SetupWindow(ctk.CTkToplevel):
     def _page_engine(self):
         if self.wizard:
             self._heading(f"How should {brand.NAME} listen?",
-                          "You can change this anytime from the tray icon.")
+                          f"You can change this anytime from the {system.TRAY_ICON}.")
         else:
             self._heading("Recognition", "Choose what turns your speech into text.")
         grid = ctk.CTkFrame(self.body, fg_color="transparent")
@@ -742,11 +818,11 @@ class SetupWindow(ctk.CTkToplevel):
         name = config.engine_label(engine)
         if engine == config.LOCAL:
             self._heading("Local model",
-                          "Recognition runs entirely on your PC. The model is downloaded "
-                          "once – after that, everything works offline.")
+                          f"Recognition runs entirely on your {system.COMPUTER}. The model is "
+                          "downloaded once – after that, everything works offline.")
         else:
             self._heading(f"Connect {name}",
-                          f"Paste your {name} API key. It stays on this PC.")
+                          f"Paste your {name} API key. It stays on this {system.COMPUTER}.")
         box = ctk.CTkFrame(self.body, fg_color="transparent")
         box.pack(fill="x", pady=(26, 0))
         self._engine_setup(box, engine, on_valid=None)
@@ -811,15 +887,21 @@ class SetupWindow(ctk.CTkToplevel):
                          polish, self._toggle_polish)
         self.polish_key = ctk.CTkFrame(self.body, fg_color="transparent", height=1)
         self.polish_key.pack(fill="x")
-        self._switch_row(self.body, ICONS["power"], "Start with Windows",
+        self._switch_row(self.body, ICONS["power"], system.AUTOSTART_LABEL,
                          f"{brand.NAME} starts in the background when you sign in.",
                          self.autostart_on, lambda: autostart.set_enabled(self.autostart_on.get()))
+        if hotkey_needs_setup():
+            self._section("Keyboard")
+            self._access_rows(self.body)
         self._section("Help")
         links = ctk.CTkFrame(self.body, fg_color="transparent")
         links.pack(fill="x")
-        for text, action in (("Run setup again", self._restart_wizard),
-                             ("Open log", lambda: os.startfile(config.LOG_PATH)),
-                             ("Help & documentation ↗", lambda: webbrowser.open(brand.REPO_URL))):
+        actions = [("Run setup again", self._restart_wizard),
+                   ("Open log", lambda: system.open_path(config.LOG_PATH)),
+                   ("Help & documentation ↗", lambda: webbrowser.open(brand.REPO_URL))]
+        if self.on_quit:
+            actions.append((f"Quit {brand.NAME}", self.on_quit))
+        for text, action in actions:
             ctk.CTkButton(links, text=text, height=36, corner_radius=10, fg_color=SURFACE,
                           hover_color=SURFACE_HOVER, text_color=TEXT, border_width=1,
                           border_color=BORDER, font=self.font(13),
@@ -844,6 +926,83 @@ class SetupWindow(ctk.CTkToplevel):
         config.set("polish", "1" if on else "0")
         self.on_change()
 
+    # -- keyboard access (macOS permission, Wayland shortcut) ---------------------
+
+    def _access_rows(self, master):
+        """What the hotkey still needs from the user, and a way to do it."""
+        linux = system.NAME == "Linux"
+        if sys.platform == "darwin":
+            text = (f"macOS asks before an app may react to keys and type for you. Allow "
+                    f"{brand.NAME} under System Settings → Privacy & Security → Accessibility "
+                    f"– {system.HOTKEY} and pasting need it.")
+            button = "Open System Settings"
+        elif linux:
+            text = ("Wayland doesn't let apps listen for keys themselves. Add a shortcut in "
+                    "your desktop's keyboard settings that runs this command – "
+                    f"{system.HOTKEY} is a good choice:")
+            button = f"Add {system.HOTKEY} for me" if system.is_gnome() else None
+        else:
+            text, button = f"{system.HOTKEY} works right away.", None
+        ctk.CTkLabel(master, text=text, font=self.font(13), text_color=MUTED, anchor="w",
+                     justify="left", wraplength=self.text_width).pack(fill="x")
+        if linux:
+            row = ctk.CTkFrame(master, fg_color="transparent")
+            row.pack(fill="x", pady=(10, 0))
+            command = ctk.CTkEntry(row, height=40, corner_radius=10, border_width=1,
+                                   fg_color=FIELD, border_color=BORDER, text_color=TEXT,
+                                   font=self.font(12.5))
+            command.insert(0, system.shortcut_command())
+            command.configure(state="readonly")
+            command.pack(side="left", fill="x", expand=True)
+            self._button(row, "Copy", lambda: self._copy(system.shortcut_command()),
+                         primary=False, width=90).pack(side="left", padx=(8, 0))
+        if button:
+            self._button(master, button, self._request_access, width=220).pack(
+                anchor="w", pady=(14, 0))
+        self.access_status = StatusLine(master, self)
+        self.access_status.pack(fill="x", pady=(12, 0))
+        self._access_checked = 0.0
+        self._refresh_access()
+
+    def _copy(self, text):
+        self.clipboard_clear()
+        self.clipboard_append(text)
+
+    def _request_access(self):
+        try:
+            system.request_access()
+        except Exception:
+            self.access_status.set("error", "That didn't work – add the shortcut by hand.")
+            return
+        self._access_checked = 0.0
+        self._refresh_access()
+
+    def _refresh_access(self):
+        """Show whether the hotkey is ready; checks at most once a second."""
+        status = getattr(self, "access_status", None)
+        if status is None or not status.winfo_exists():
+            return
+        if time.monotonic() - self._access_checked < 1.0:
+            return
+        self._access_checked = time.monotonic()
+        if not system.missing_access():
+            status.set("ok", f"Ready – {system.HOTKEY} works everywhere.")
+        elif sys.platform == "darwin":
+            status.set("warning", "Not allowed yet.")
+        elif system.NAME == "Linux" and system.is_gnome():
+            status.set("warning", "No shortcut yet.")
+        else:
+            status.set("info", f"{brand.NAME} can't see your desktop's shortcuts: "
+                               "add it once, then it works.")
+
+    def _page_access(self):  # wizard only, when the hotkey needs the user
+        self._heading("Allow keyboard access" if sys.platform == "darwin"
+                      else f"Set up {system.HOTKEY}")
+        box = ctk.CTkFrame(self.body, fg_color="transparent")
+        box.pack(fill="x", pady=(22, 0))
+        self._access_rows(box)
+        self._wizard_footer()
+
     def _restart_wizard(self):
         master, on_change = self.master, self.on_change
         self.close()
@@ -853,21 +1012,21 @@ class SetupWindow(ctk.CTkToplevel):
         badge(self.body, self, ICONS["check"], 64, 26, ACCENT, ACCENT_TEXT).pack(
             anchor="w", pady=(8, 20))
         self._heading("You're all set",
-                      f"{brand.NAME} runs in the background – you'll find its icon in the "
-                      "notification area of the taskbar. From there you can change recognition "
-                      "and language anytime.")
+                      f"{brand.NAME} runs in the background – you'll find its icon in "
+                      f"{system.TRAY_PLACE}. From there you can change recognition and "
+                      "language anytime.")
         how = ctk.CTkFrame(self.body, fg_color=SURFACE, corner_radius=14, border_width=1,
                            border_color=BORDER)
         how.pack(fill="x", pady=(26, 16))
-        for i, (keys, text) in enumerate((("Win + O", "Start recording"),
-                                          ("Win + O", "Stop – your text is pasted"),
+        for i, (keys, text) in enumerate(((system.HOTKEY, "Start recording"),
+                                          (system.HOTKEY, "Stop – your text is pasted"),
                                           ("Esc", "Cancel"))):
             ctk.CTkLabel(how, text=keys, font=self.font(12.5, "bold"), text_color=TEXT,
-                         fg_color=FIELD, corner_radius=8, width=76, height=30).grid(
+                         fg_color=FIELD, corner_radius=8, width=96, height=30).grid(
                 row=i, column=0, padx=(16, 14), pady=(14 if i == 0 else 6, 14 if i == 2 else 6))
             ctk.CTkLabel(how, text=text, font=self.font(13.5), text_color=MUTED,
                          anchor="w").grid(row=i, column=1, sticky="w")
-        self._switch_row(self.body, ICONS["power"], "Start with Windows",
+        self._switch_row(self.body, ICONS["power"], system.AUTOSTART_LABEL,
                          f"{brand.NAME} starts in the background when you sign in.",
                          self.autostart_on, None)
         self._wizard_footer("Get started", self._finish)
