@@ -11,7 +11,7 @@ body:
     attributes:
       label: BetterVoice version
       description: Shown in the sidebar of the settings window, or run `bettervoice --version`.
-      placeholder: 0.1.0b1
+      placeholder: 0.1.0b2
     validations:
       required: true
   - type: input

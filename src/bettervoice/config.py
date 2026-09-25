@@ -144,6 +144,7 @@ _SETTINGS = {
     "polish": (("DICTATE_POLISH",), "0"),
     "setup_done": (("DICTATE_SETUP_DONE",), "0"),
     "local_model": (("DICTATE_LOCAL_MODEL",), LOCAL_AUTO),
+    "local_unload": (("DICTATE_LOCAL_UNLOAD",), "1"),  # free the model when idle
     "deepgram_key": (("DEEPGRAM_API_KEY",), ""),
     "deepgram_model": (("DEEPGRAM_MODEL", "DICTATE_MODEL"), "nova-3"),
     "elevenlabs_key": (("ELEVENLABS_API_KEY",), ""),

@@ -48,7 +48,9 @@ API keys are checked with the provider when you save them. BetterVoice keeps an 
 | **Balanced** | `small` | 490 MB | Good accuracy, quick on a processor. |
 | **Best quality** | `large-v3-turbo` | 1.6 GB | The most accurate; slow without a GPU. |
 
-Models are downloaded once from Hugging Face into the models folder (`%APPDATA%\BetterVoice\models` on Windows, `~/Library/Application Support/BetterVoice/models` on a Mac, `~/.local/share/bettervoice/models` on Linux). An interrupted download resumes where it stopped. The model stays loaded while the **Local** engine is selected; switching to a cloud engine frees its memory.
+Models are downloaded once from Hugging Face into the models folder (`%APPDATA%\BetterVoice\models` on Windows, `~/Library/Application Support/BetterVoice/models` on a Mac, `~/.local/share/bettervoice/models` on Linux). An interrupted download resumes where it stopped.
+
+The model runs in a process of its own that starts when you press the hotkey, so it loads while you speak: `large-v3-turbo` is ready about 2 s later on an NVIDIA GPU. Five minutes after your last dictation the process ends and gives its memory back. Idle, BetterVoice then needs about 80 MB of RAM; while the model is loaded, about 600 MB more with a GPU (mostly NVIDIA's CUDA runtime; the model itself sits in video memory) or 300–1,000 MB on the processor, depending on the model. To keep the model loaded, turn off **Free the memory 5 minutes after the last dictation** under **Settings… → Recognition → Local**. Switching to a cloud engine frees the memory at once.
 
 The GPU is used when an NVIDIA graphics card and NVIDIA's CUDA 12 libraries are available. On Windows, the CUDA edition (`…-cuda-setup.exe` or `…-cuda.zip`) includes cuBLAS; with the standard edition, BetterVoice uses the processor. On Linux, BetterVoice uses cuBLAS 12 and cuDNN 9 when they are installed, from your distribution or NVIDIA's `pip` packages. On a Mac, the offline engine runs on the processor.
 

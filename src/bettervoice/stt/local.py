@@ -1,14 +1,14 @@
 """Local recognition with Whisper (faster-whisper / CTranslate2), fully offline.
 
-The model is downloaded once (with progress), then loaded in the background
-and kept in memory. faster-whisper is imported lazily: using only a cloud
-engine doesn't pay for it.
+The model is downloaded once (with progress). It runs in a process of its own
+(local_worker.py), started when a dictation begins - the model loads while
+the user speaks - and ended a few minutes after the last dictation, so the
+memory it and CUDA take is given back while BetterVoice sits idle.
 """
 
-import ctypes.util
-import glob
 import json
 import logging
+import multiprocessing
 import os
 import sys
 import threading
@@ -18,15 +18,17 @@ import urllib.request
 import numpy as np
 
 from bettervoice import brand, config
-from bettervoice.mic import SAMPLE_RATE
+from bettervoice.stt import local_worker
 from bettervoice.stt.chunked import Transcriber
 from bettervoice.stt.errors import SttError
 
 log = logging.getLogger(__name__)
 
-BEAM_SIZE = 5
 GPU_AUTO_MODEL = "large-v3-turbo"
 CPU_AUTO_MODEL = "small"
+IDLE_UNLOAD_S = 5 * 60  # the model is freed this long after the last dictation
+IDLE_CHECK_S = 15
+LOAD_TIMEOUT_S = 600  # a large model on a slow CPU
 
 HUB = "https://huggingface.co"
 
@@ -37,63 +39,22 @@ MODEL_REPOS = {
 }
 _MODEL_FILES = ("config.json", "preprocessor_config.json", "model.bin", "tokenizer.json")
 
-# the GPU needs CUDA 12's cuBLAS (pip install nvidia-cublas-cu12); on Windows
-# CTranslate2 ships the rest itself, on Linux it also needs cuDNN 9
-if sys.platform == "win32":
-    _CUDA_LIBS = ("cublas64_12.dll", "cublasLt64_12.dll")
-else:
-    _CUDA_LIBS = ("libcublas.so.12", "libcublasLt.so.12", "libcudnn.so.9")
-
 
 # ------------------------------------------------------------------- GPU ---
 
 
-def _cuda_dll_dirs():
-    """Folders that may hold NVIDIA's libraries, besides the system's."""
-    # a "cuda" folder next to the app or in the data folder
-    dirs = [os.path.join(config.APP_DIR, "cuda"), os.path.join(config.DATA_DIR, "cuda")]
-    try:
-        import nvidia  # pip install nvidia-cublas-cu12
-
-        for base in nvidia.__path__:
-            dirs += glob.glob(os.path.join(base, "*", "bin" if sys.platform == "win32" else "lib"))
-    except ImportError:
-        pass
-    return [d for d in dirs if os.path.isdir(d)]
-
-
-def _load_globally(name):
-    """Load a CUDA library for CTranslate2: it then finds it by name."""
-    for folder in _cuda_dll_dirs():
-        path = os.path.join(folder, name)
-        if os.path.exists(path):
-            try:
-                ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
-                return True
-            except OSError as e:
-                log.info("could not load %s: %s", path, e)
-    try:
-        ctypes.CDLL(name, mode=ctypes.RTLD_GLOBAL)  # installed system-wide
-        return True
-    except OSError:
-        return False
-
-
 def gpu_status():
-    """"ok", "no_cublas" (NVIDIA GPU but CUDA libraries missing) or "none"."""
+    """"ok", "no_cublas" (NVIDIA GPU but CUDA libraries missing) or "none".
+
+    Only looks: CUDA itself is loaded by the worker process, never here.
+    """
     if sys.platform == "darwin":
         return "none"  # CTranslate2 has no Metal backend: the CPU it is
     import ctranslate2
 
     if ctranslate2.get_cuda_device_count() == 0:
         return "none"
-    if sys.platform == "win32":
-        for d in _cuda_dll_dirs():
-            if d not in os.environ["PATH"]:  # CTranslate2 looks the DLLs up via PATH
-                os.environ["PATH"] = d + os.pathsep + os.environ["PATH"]
-        missing = [lib for lib in _CUDA_LIBS if ctypes.util.find_library(lib) is None]
-    else:
-        missing = [lib for lib in _CUDA_LIBS if not _load_globally(lib)]
+    missing = [lib for lib in local_worker.CUDA_LIBS if not local_worker.find_cuda_lib(lib)]
     if missing:
         log.info("GPU found, but not %s: using the CPU", ", ".join(missing))
         return "no_cublas"
@@ -196,76 +157,69 @@ def download(name, on_progress=None):
 # ----------------------------------------------------------------- model ---
 
 
-class Whisper:
-    """A loaded Whisper model that transcribes one chunk (<= 30 s) at a time."""
+class WorkerModel:
+    """The loaded model, in a process of its own (local_worker.serve).
 
-    def __init__(self, name, device, path):
-        from faster_whisper import WhisperModel
-        from faster_whisper.tokenizer import Tokenizer
-        from faster_whisper.transcribe import get_suppressed_tokens
+    Creating one starts the process and blocks until the model is loaded;
+    close() ends it, which frees its memory and the GPU's.
+    """
 
-        self.name = name
-        self.device = device
-        self.model = WhisperModel(
-            path,
-            device=device,
-            # int8 GEMMs aren't supported on every GPU (e.g. RTX 50xx): fp16 is
-            compute_type="float16" if device == "cuda" else "int8",
-            cpu_threads=min(os.cpu_count() or 4, 8),
-        )
-        self._tokenizer_cls = Tokenizer
-        self._suppress = list(get_suppressed_tokens(self._tokenizer("en"), [-1]))
-
-    def _tokenizer(self, language):
-        m = self.model
-        return self._tokenizer_cls(
-            m.hf_tokenizer, m.model.is_multilingual, task="transcribe", language=language
-        )
-
-    def warm_up(self):
-        """The first call is slow (allocations, kernel setup): do it now."""
-        self.transcribe(np.zeros(SAMPLE_RATE, np.float32), "en")
+    def __init__(self, name, device, path, model=None):
+        self.name, self.device = name, device
+        self._lock = threading.Lock()
+        ctx = multiprocessing.get_context("spawn")  # a fresh interpreter: no tk, no threads
+        self._conn, child = ctx.Pipe()
+        args = (child, name, device, path) + ((model,) if model else ())
+        self._process = ctx.Process(target=local_worker.serve, args=args, daemon=True,
+                                    name="BetterVoice recognition")
+        self._process.start()
+        child.close()
+        try:
+            if not self._conn.poll(LOAD_TIMEOUT_S):
+                raise SttError("Local model failed to load", "it took too long")
+            kind, detail = self._conn.recv()
+        except (EOFError, OSError) as e:
+            self.close()
+            raise SttError("Local model failed to load",
+                           f"the recognition process ended: {e!r}") from e
+        except SttError:
+            self.close()
+            raise
+        if kind != "ready":
+            self.close()
+            raise SttError("Local model failed to load", detail)
 
     def transcribe(self, audio, language=None, prompt=""):
         """audio: float32, 16 kHz mono, <= 30 s. language None = detect it."""
-        from faster_whisper.audio import pad_or_trim
+        with self._lock:
+            try:
+                self._conn.send((np.ascontiguousarray(audio, np.float32).tobytes(), language,
+                                 prompt))
+                kind, value = self._conn.recv()
+            except (EOFError, OSError) as e:
+                raise SttError("Local recognition stopped", repr(e)) from e
+        if kind != "text":
+            raise SttError("Recognition failed", value)
+        return value
 
-        m = self.model
-        # encode once: language detection and decoding both reuse the result
-        encoded = m.encode(pad_or_trim(m.feature_extractor(audio)))
-        if language is None:
-            language = self._detect_language(encoded)
-        tokenizer = self._tokenizer(language)
-        prefix = []
-        if prompt:
-            prefix = [tokenizer.sot_prev] + tokenizer.encode(" " + prompt.strip())
-        result = m.model.generate(
-            encoded,
-            [prefix + list(tokenizer.sot_sequence) + [tokenizer.no_timestamps]],
-            beam_size=BEAM_SIZE,
-            max_length=448,
-            return_scores=True,
-            return_no_speech_prob=True,
-            suppress_blank=True,
-            suppress_tokens=self._suppress,
-        )[0]
-        if result.no_speech_prob > 0.6 and result.scores[0] < -1.0:
-            return ""  # Whisper's own verdict: this was noise, not speech
-        tokens = [t for t in result.sequences_ids[0] if t < tokenizer.eot]
-        return tokenizer.decode(tokens).strip()
-
-    def _detect_language(self, encoded):
-        """Most likely language, preferring the ones offered in the menu."""
-        ranked = self.model.model.detect_language(encoded)[0]  # [("<|de|>", p), ...]
-        for token, _ in ranked:
-            if token[2:-2] in config.LANGUAGES:
-                return token[2:-2]
-        return ranked[0][0][2:-2]
+    def close(self):
+        """End the process (after a transcription still running)."""
+        with self._lock:
+            try:
+                self._conn.send(None)
+            except OSError:
+                pass
+            self._process.join(5)
+            if self._process.is_alive():
+                self._process.terminate()
+                self._process.join(5)
+            self._conn.close()
 
 
 class LocalEngine:
-    """Owns the Whisper model: downloads and loads it in the background and
-    keeps it resident. The status fields are read by the tray and the UI."""
+    """Owns the local model: downloads it, loads it in its process when a
+    dictation starts, and frees it after IDLE_UNLOAD_S without use (setting
+    "local_unload"). The status fields are read by the tray and the UI."""
 
     def __init__(self):
         self.on_status = None  # called (from any thread) when status changes
@@ -273,10 +227,13 @@ class LocalEngine:
         self.status = "off"  # a short text for the tray and the UI
         self.progress = None  # 0..1 while downloading
         self._lock = threading.Lock()
+        self._download_lock = threading.Lock()  # a fetch and a load may both want it
         self._wanted = None  # model choice currently loaded or loading
         self._whisper = None
         self._error = None
         self._ready = threading.Event()
+        self._last_used = time.monotonic()
+        self._idle_watch = None
 
     @property
     def ready(self):
@@ -287,26 +244,42 @@ class LocalEngine:
         """Why the last load failed (user-facing), or None."""
         return getattr(self._error, "message", None) if self.state == "error" else None
 
+    def has_model(self, choice):
+        """Whether the model for this choice is downloaded."""
+        return model_path(resolve(choice, gpu_status() == "ok")) is not None
+
+    def fetch(self, choice):
+        """Have the model on disk, downloading it in the background if needed,
+        without loading it: that happens when a dictation starts."""
+        threading.Thread(target=self._fetch_only, args=(choice,), daemon=True).start()
+
     def load(self, choice):
-        """Switch to this model choice; returns immediately. A failed load
-        of the same choice is retried."""
+        """Load this model choice in its process; returns immediately. A
+        failed load of the same choice is retried."""
         with self._lock:
+            self._last_used = time.monotonic()
             if choice == self._wanted and self.state != "error":
                 return
+            old, self._whisper = self._whisper, None
             self._wanted = choice
-            self._whisper = self._error = None
+            self._error = None
             self._ready.clear()
+            if self._idle_watch is None:
+                self._idle_watch = threading.Thread(target=self._watch_idle, daemon=True)
+                self._idle_watch.start()
+        self._close_later(old)
         self._set("loading", "starting…")
         threading.Thread(target=self._load, args=(choice,), daemon=True).start()
 
     def unload(self):
-        """Free the (V)RAM, e.g. when switching to a cloud engine."""
+        """Free the memory, e.g. when switching to a cloud engine."""
         with self._lock:
             if self._wanted is None:
                 return
-            self._wanted = self._whisper = None
+            old, self._whisper, self._wanted = self._whisper, None, None
             self._error = SttError("The local model is switched off")
             self._ready.set()  # a session still waiting gives up instead of hanging
+        self._close_later(old)
         self._set("off", "off")
 
     def wait(self):
@@ -316,6 +289,60 @@ class LocalEngine:
             if self._whisper is None:
                 raise self._error or SttError("Local model not available")
             return self._whisper
+
+    def transcribe(self, audio, language, prompt):
+        """Transcribe with the loaded model; after an idle unload, load it again."""
+        with self._lock:
+            unloaded = self._wanted is None
+        if unloaded:
+            self.load(config.get("local_model"))
+        whisper = self.wait()
+        self._touch()
+        try:
+            return whisper.transcribe(audio, language, prompt)
+        finally:
+            self._touch()
+
+    def _touch(self):
+        with self._lock:
+            self._last_used = time.monotonic()
+
+    @staticmethod
+    def _close_later(whisper):
+        if whisper is not None:  # ending a process takes a moment: not on the caller's time
+            threading.Thread(target=whisper.close, daemon=True).start()
+
+    def _watch_idle(self):
+        while True:
+            time.sleep(IDLE_CHECK_S)
+            if not config.enabled("local_unload"):
+                continue
+            with self._lock:
+                if (self.state != "ready" or self._whisper is None
+                        or time.monotonic() - self._last_used < IDLE_UNLOAD_S):
+                    continue
+                old, self._whisper, self._wanted = self._whisper, None, None
+            log.info("freed the local model after %d minutes without dictation",
+                     IDLE_UNLOAD_S // 60)
+            self._close_later(old)
+            self._set("off", f"{old.name} – loads when you dictate")
+
+    def _fetch_only(self, choice):
+        try:
+            name = resolve(choice, gpu_status() == "ok")
+            self._fetch(name, lambda: self._wanted in (None, choice))
+        except Exception as e:
+            error = e if isinstance(e, SttError) else SttError("Model download failed", str(e))
+            log.error("could not download the local model: %s", error)
+            with self._lock:
+                if self._wanted is None:  # a load reports its own errors
+                    self._error = error
+                    self._set("error", "error – see the log")
+            return
+        with self._lock:
+            if self._wanted is None:
+                self._error = None
+                self._set("off", f"{name} – loads when you dictate")
 
     def _load(self, choice):
         def still_wanted():
@@ -331,10 +358,14 @@ class LocalEngine:
             log.exception("could not load the local model")
             whisper, error = None, SttError("Local model failed to load", str(e))
         with self._lock:
-            if not still_wanted():
-                return  # superseded by another load() or unload()
-            self._whisper, self._error = whisper, error
-            self._ready.set()
+            superseded = not still_wanted()
+            if not superseded:
+                self._whisper, self._error = whisper, error
+                self._last_used = time.monotonic()
+                self._ready.set()
+        if superseded:  # by another load() or unload() meanwhile
+            self._close_later(whisper)
+            return
         if whisper is None:
             self._set("error", "error – see the log")
         else:
@@ -349,36 +380,34 @@ class LocalEngine:
         if gpu:
             try:
                 self._set("loading", f"loading {name}…")
-                whisper = Whisper(name, "cuda", path)
-                whisper.warm_up()
-                return whisper
-            except Exception as e:
+                return WorkerModel(name, "cuda", path)
+            except SttError as e:
                 log.warning("GPU failed, using the CPU instead: %s", e)
                 if choice == config.LOCAL_AUTO and name != CPU_AUTO_MODEL:
                     name = CPU_AUTO_MODEL
                     path = self._fetch(name, still_wanted)
         self._set("loading", f"loading {name}…")
-        whisper = Whisper(name, "cpu", path)
-        whisper.warm_up()
-        return whisper
+        return WorkerModel(name, "cpu", path)
 
     def _fetch(self, name, still_wanted):
-        path = model_path(name)
-        if path is not None:
-            return path
+        with self._download_lock:
+            path = model_path(name)
+            if path is not None:
+                return path
 
-        def on_progress(done, total):
-            if still_wanted():
-                self._set("downloading", f"downloading {name}… {done * 100 // total}%",
-                          done / total)
+            def on_progress(done, total):
+                if still_wanted():
+                    self._set("downloading", f"downloading {name}… {done * 100 // total}%",
+                              done / total)
 
-        self._set("downloading", f"downloading {name}…", 0.0)
-        try:
-            return download(name, on_progress)
-        except SttError:
-            raise
-        except OSError as e:
-            raise SttError("Model download failed – check your internet connection", str(e)) from e
+            self._set("downloading", f"downloading {name}…", 0.0)
+            try:
+                return download(name, on_progress)
+            except SttError:
+                raise
+            except OSError as e:
+                raise SttError("Model download failed – check your internet connection",
+                               str(e)) from e
 
     def _set(self, state, status, progress=None):
         self.state, self.status, self.progress = state, status, progress
@@ -390,14 +419,15 @@ ENGINE = LocalEngine()
 
 
 class LocalTranscriber(Transcriber):
-    """Whisper on this PC; waits for the model if it's still loading."""
+    """Whisper on this computer; waits for the model if it's still loading."""
 
     min_chunk_s = 6
     max_chunk_s = 25  # Whisper only sees 30 s at a time
     min_pause_s = 0.5
 
     def prepare(self):
-        ENGINE.load(config.get("local_model"))  # no-op if loaded; retries a failed load
+        # the model loads while the user speaks; no-op if it's loaded already
+        ENGINE.load(config.get("local_model"))
 
     def transcribe(self, audio, language, prompt):
-        return ENGINE.wait().transcribe(audio, language, prompt)
+        return ENGINE.transcribe(audio, language, prompt)

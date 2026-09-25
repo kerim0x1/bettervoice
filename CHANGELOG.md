@@ -2,6 +2,12 @@
 
 All notable changes to BetterVoice are documented here. Versions follow [Semantic Versioning](https://semver.org/); pre-releases carry a beta number, as in `0.1.0b1` (0.1.0 beta 1). Each heading is the exact version: the release workflow takes the release notes from it.
 
+## 0.1.0b2 — 2026-09-25
+
+### Changed
+
+- The offline model runs in a process of its own that starts when you press the hotkey and ends five minutes after your last dictation. Idle, BetterVoice now needs about 80 MB of memory instead of about 630 MB with an NVIDIA GPU, and no video memory. The model loads while you speak (`large-v3-turbo` in about 2 s on a GPU). To keep it loaded, turn off **Free the memory 5 minutes after the last dictation** under **Settings… → Recognition → Local**.
+
 ## 0.1.0b1 — 2026-09-23
 
 The first public release, and the first under the BetterVoice name. BetterVoice runs on Windows, macOS, and Linux.

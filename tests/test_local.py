@@ -5,6 +5,7 @@ import threading
 import time
 import types
 
+import numpy as np
 import pytest
 
 from bettervoice.stt import local
@@ -93,8 +94,10 @@ def test_download_starts_over_if_the_server_ignores_ranges(hub):
     assert (folder / "model.bin").read_bytes() == FILES["model.bin"]
 
 
-def fake_whisper(name="small"):
-    return types.SimpleNamespace(name=name, device="cpu")
+def fake_whisper(name="small", closed=None):
+    return types.SimpleNamespace(
+        name=name, device="cpu", close=lambda: closed is not None and closed.append(name),
+        transcribe=lambda audio, language, prompt: f"{name}: {len(audio)}")
 
 
 def test_failed_load_is_retried(monkeypatch):
@@ -153,3 +156,79 @@ def test_resolve():
     assert local.resolve("auto", gpu=True) == "large-v3-turbo"
     assert local.resolve("auto", gpu=False) == "small"
     assert local.resolve("base", gpu=True) == "base"
+
+
+def wait_for(condition, timeout=5):
+    deadline = time.monotonic() + timeout
+    while not condition() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return condition()
+
+
+def test_fetch_downloads_without_loading(hub, settings):
+    engine = local.LocalEngine()
+    engine.fetch("small")
+    assert wait_for(lambda: engine.status == "small – loads when you dictate")
+    assert engine.state == "off" and local.model_path("small") is not None
+    assert engine._whisper is None  # nothing in memory until a dictation starts
+
+
+def test_idle_model_is_freed_and_loads_again(monkeypatch, settings):
+    monkeypatch.setattr(local, "IDLE_UNLOAD_S", 0.3)
+    monkeypatch.setattr(local, "IDLE_CHECK_S", 0.05)
+    engine = local.LocalEngine()
+    closed = []
+    loads = []
+
+    def load(choice, still_wanted):
+        loads.append(choice)
+        return fake_whisper(choice, closed)
+
+    monkeypatch.setattr(engine, "_load_whisper", load)
+    settings.set("local_model", "small")
+    engine.load("small")
+    assert engine.transcribe([0.0] * 5, "de", "") == "small: 5"
+    assert engine.state == "ready"
+    assert wait_for(lambda: engine.state == "off")  # idle: freed
+    assert wait_for(lambda: closed == ["small"])
+    assert engine.status == "small – loads when you dictate"
+    assert engine.transcribe([0.0] * 7, "de", "") == "small: 7"  # loads again
+    assert loads == ["small", "small"]
+
+
+def test_the_model_can_stay_loaded(monkeypatch, settings):
+    monkeypatch.setattr(local, "IDLE_UNLOAD_S", 0.1)
+    monkeypatch.setattr(local, "IDLE_CHECK_S", 0.05)
+    settings.set("local_unload", "0")
+    engine = local.LocalEngine()
+    monkeypatch.setattr(engine, "_load_whisper", lambda c, s: fake_whisper(c))
+    engine.load("small")
+    engine.wait()
+    time.sleep(0.4)
+    assert engine.state == "ready"
+
+
+def test_the_model_runs_in_a_process_of_its_own():
+    model = local.WorkerModel("tiny", "cpu", "unused", model="fake_model:FakeWhisper")
+    try:
+        assert model._process.is_alive() and model._process.pid != os.getpid()
+        text = model.transcribe(np.zeros(16000, np.float32), "de", "Hello")
+        assert text == "16000 samples, de, 'Hello'"
+    finally:
+        model.close()
+    assert not model._process.is_alive()  # its memory is free again
+
+
+def test_a_failed_load_in_the_process_is_reported():
+    with pytest.raises(SttError, match="failed to load") as error:
+        local.WorkerModel("broken", "cpu", "unused", model="fake_model:FakeWhisper")
+    assert "no such model" in str(error.value)
+
+
+def test_a_crashed_process_fails_the_transcription():
+    model = local.WorkerModel("tiny", "cpu", "unused", model="fake_model:FakeWhisper")
+    try:
+        with pytest.raises(SttError, match="stopped"):
+            model.transcribe(np.zeros(10, np.float32), None, "crash")
+    finally:
+        model.close()

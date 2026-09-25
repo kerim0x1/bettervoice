@@ -19,7 +19,7 @@ Run from a console to see the log live. `bettervoice --setup` shows the setup wi
 | `test_config.py` | Settings, legacy names, `.env` parsing, joining transcripts | — |
 | `test_chunked.py` | Splitting at pauses, context, silence, errors, cancelling | — |
 | `test_engines.py` | ElevenLabs and OpenRouter requests against a local mock server, error mapping, keep-alive retry, key checks, AI Polish | — |
-| `test_local.py` | Model download with resume against a local mock hub, retry after a failed load, unload | — |
+| `test_local.py` | Model download with resume against a local mock hub, retry after a failed load, unload, freeing the model when idle and loading it again, and the recognition process itself (with a stand-in model from `fake_model.py`) | — |
 | `test_app.py` | Hotkey, <kbd>Esc</kbd>, commands, errors, and pasting with fake sessions | — |
 | `test_desktop.py` | The key filter, the way to the tk thread, and the system's own parts: the Windows keyboard hook, the macOS event tap, and on Linux the Wayland shortcut, a real X11 key grab, and pasting into a text field with XTest | Linux: an X display and xdotool |
 | `test_ipc.py` | Commands from a second start, the key check, one instance per user | — |

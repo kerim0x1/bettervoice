@@ -212,11 +212,14 @@ def handle_command(command):
 
 
 def sync_engine():
-    """Load the local model if it's selected, otherwise free its memory; warm
-    up what the selected engine needs so the first dictation is quick."""
+    """Make sure the local model is downloaded if it's selected (it loads when
+    a dictation starts, or right away when it's to stay loaded), otherwise free
+    its memory; warm up what the selected engine needs."""
     engine = config.get("engine")
     if engine == config.LOCAL:
-        LOCAL.load(config.get("local_model"))
+        LOCAL.fetch(config.get("local_model"))
+        if not config.enabled("local_unload"):
+            LOCAL.load(config.get("local_model"))
     else:
         LOCAL.unload()
     if engine != config.DEEPGRAM:
@@ -371,7 +374,7 @@ def _configured_before():
     as far as downloading a local model: keep running without the wizard."""
     engine = config.get("engine")
     if engine == config.LOCAL:
-        return LOCAL.state != "off"
+        return LOCAL.state != "off" or LOCAL.has_model(config.get("local_model"))
     return config.has_key(engine)
 
 
@@ -453,13 +456,22 @@ def self_check():
     lacks something fails here, in CI, instead of in front of the user."""
     import ctranslate2  # noqa: F401 - the local engine
     import faster_whisper  # noqa: F401
+    import numpy as np
 
     from bettervoice import setup_ui  # noqa: F401
     from bettervoice.stt import deepgram, elevenlabs, openrouter  # noqa: F401
     from bettervoice.stt.chunked import warm_up_vad
+    from bettervoice.stt.local import WorkerModel
 
     warm_up_vad()  # the Silero model and ONNX Runtime
     system.self_check()
+    # the recognition process starts as the packaged app itself: does it?
+    worker = WorkerModel("check", "cpu", "", model="bettervoice.stt.local_worker:Echo")
+    try:
+        if worker.transcribe(np.zeros(160, np.float32)) != "160":
+            raise RuntimeError("the recognition process answered wrongly")
+    finally:
+        worker.close()
 
 
 def run(argv=None):

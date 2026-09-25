@@ -355,19 +355,34 @@ class LocalPanel(ctk.CTkFrame):
         self.about.pack(fill="x", pady=(0, 12))
         self._describe(config.get("local_model"))
 
-        self.device = StatusLine(self, ui)
+        box = ctk.CTkFrame(self, fg_color="transparent")  # status, progress, retry
+        box.pack(fill="x")
+        self.device = StatusLine(box, ui)
         self.device.pack(fill="x")
         self.device.set("busy", "Checking the graphics card…")
-        self.model = StatusLine(self, ui)
+        self.model = StatusLine(box, ui)
         self.model.pack(fill="x", pady=(2, 0))
-        self.progress = ctk.CTkProgressBar(self, height=6, corner_radius=3, fg_color=FIELD,
+        self.progress = ctk.CTkProgressBar(box, height=6, corner_radius=3, fg_color=FIELD,
                                            progress_color=ACCENT)
         self.progress.set(0)
-        self.retry = ctk.CTkButton(self, text="Try again", width=150, height=34,
+        self.retry = ctk.CTkButton(box, text="Try again", width=150, height=34,
                                    corner_radius=10, fg_color=SELECTED, hover_color=BORDER_HOVER,
                                    text_color=TEXT, font=ui.font(12.5), command=self.start_download)
+        if on_change is not None:  # the settings, not the setup
+            self.unload = ctk.BooleanVar(value=config.enabled("local_unload"))
+            ctk.CTkSwitch(self, text="Free the memory 5 minutes after the last dictation – "
+                                     "it loads again while you speak",
+                          variable=self.unload, command=self._toggle_unload,
+                          font=ui.font(12.5), text_color=MUTED, switch_width=36,
+                          switch_height=18, fg_color=SELECTED, progress_color=ACCENT,
+                          button_color=BG, button_hover_color=SURFACE).pack(
+                anchor="w", pady=(14, 0))
 
         ui.run_async(local.gpu_status, self._gpu_detected)
+
+    def _toggle_unload(self):
+        config.set("local_unload", "1" if self.unload.get() else "0")
+        self.on_change()  # kept loaded from now on, or freed when idle
 
     @property
     def wanted(self):
@@ -415,7 +430,7 @@ class LocalPanel(ctk.CTkFrame):
         self.refresh()
 
     def start_download(self):
-        local.ENGINE.load(config.get("local_model"))
+        local.ENGINE.fetch(config.get("local_model"))  # loaded when a dictation starts
         self.refresh()
 
     def refresh(self):
