@@ -46,7 +46,7 @@ gpu = [
     "nvidia-cublas-cu12; sys_platform != 'darwin'",
     "nvidia-cudnn-cu12; sys_platform == 'linux'",
 ]
-dev = ["pytest", "ruff==0.16.8"]  # pinned: a new ruff may add checks; Dependabot bumps it
+dev = ["pytest", "ruff==0.16.9"]  # pinned: a new ruff may add checks; Dependabot bumps it
 build = ["pyinstaller>=6.10,<7"]
 
 [project.gui-scripts]
