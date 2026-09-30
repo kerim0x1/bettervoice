@@ -20,7 +20,7 @@ Do not commit virtual environments, build output, downloaded models, `.env` file
 
 - Keep engine-specific behavior in its module under `src/bettervoice/stt/`, behind the session interface described in `stt/__init__.py`.
 - Raise `SttError` with a short, user-facing message for anything the user should see; put technical detail in the second argument, which goes to the log.
-- Never log or send what the user dictated, beyond the chosen engine.
+- Send what the user dictated only to the chosen engine (and, with AI Polish, OpenRouter). The log records each dictation once, in `app.log_dictation`; don't log it anywhere else.
 - Touch tkinter only from the main thread. Background work reports back through the existing queues.
 - Keep system-specific code in `src/bettervoice/desktop/` (`windows.py`, `macos.py`, `linux.py`, behind the interface in `desktop/__init__.py`). Test it on the systems you change; CI runs the tests on all three.
 - Take names, colors, and the mark from `bettervoice.brand`; regenerate the icons with `scripts/generate_brand_assets.py` instead of editing them.

@@ -1,6 +1,9 @@
 """The dictation flow in bettervoice.app: hotkey, Esc, errors, paste."""
 
+import logging
+import os
 import queue
+import stat
 import threading
 import time
 import types
@@ -16,12 +19,14 @@ class FakeSession:
     def __init__(self, text="Hello world.", error=None, finish_gate=None):
         self.text, self.error, self.finish_gate = text, error, finish_gate
         self.started = threading.Event()
+        self.finishing = threading.Event()
         self.aborted = False
 
     def start(self):
         self.started.set()
 
     def finish(self):
+        self.finishing.set()
         if self.finish_gate:
             self.finish_gate.wait(5)
         if self.error:
@@ -96,6 +101,52 @@ def test_polish_runs_before_paste(app, monkeypatch):
     bv.on_hotkey()
     app.wait_idle()
     assert app.pasted == ["HELLO WORLD."]
+
+
+def test_every_dictation_is_logged(app, caplog):
+    caplog.set_level(logging.INFO, "bettervoice")
+    start(app)
+    bv.on_hotkey()
+    assert app.wait_idle()
+    assert "dictated: Hello world." in caplog.messages
+
+
+def test_a_dictation_cancelled_while_processing_is_logged_too(app, caplog):
+    caplog.set_level(logging.INFO, "bettervoice")
+    gate = threading.Event()
+    app.next = lambda: FakeSession(text="Keep this.", finish_gate=gate)
+    session = start(app)
+    bv.on_hotkey()
+    assert session.finishing.wait(2)  # Esc while the text is being recognized
+    assert bv.cancel() is True
+    gate.set()
+    deadline = time.time() + 3
+    while not any("Keep this." in m for m in caplog.messages) and time.time() < deadline:
+        time.sleep(0.01)
+    assert "dictated (cancelled, not pasted): Keep this." in caplog.messages
+    assert app.pasted == []
+
+
+def test_the_log_file_is_kept_private(tmp_path):
+    path = tmp_path / "bettervoice.log"
+    path.write_text("older\n")
+    if os.name == "posix":
+        os.chmod(path, 0o644)  # as older versions left it
+    with bv.open_log(str(path)) as f:
+        f.write("newer\n")
+    assert path.read_text().splitlines() == ["older", "newer"]
+    if os.name == "posix":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_the_log_is_rotated(tmp_path, monkeypatch):
+    monkeypatch.setattr(bv, "LOG_MAX_BYTES", 10)
+    path = tmp_path / "bettervoice.log"
+    path.write_text("x" * 20)
+    with bv.open_log(str(path)) as f:
+        f.write("new\n")
+    assert (tmp_path / "bettervoice.log.1").read_text() == "x" * 20
+    assert path.read_text() == "new\n"
 
 
 def test_escape_while_recording(app):

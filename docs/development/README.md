@@ -61,7 +61,7 @@ The Windows builds go through the [build check](../../.github/actions/check-wind
 
 ## Debugging
 
-- The log is `bettervoice.log` in the log folder ([INSTALL.md](../../INSTALL.md#use-the-app) lists it for each system) when BetterVoice runs without a terminal. It records engine choice, timings, and errors, never transcripts or keys.
+- The log is `bettervoice.log` in the log folder ([INSTALL.md](../../INSTALL.md#use-the-app) lists it for each system) when BetterVoice runs without a terminal. It records engine choice, timings, errors, and every dictation, never keys.
 - `LocalEngine.status` and the tray tooltip show the offline model's state.
 - To test a clean first start, point the settings at an empty folder for one run: on Windows `$env:APPDATA = "$env:TEMP\bv-test"; bettervoice`, on Linux `XDG_CONFIG_HOME=/tmp/bv-test bettervoice`.
 - `bettervoice --toggle` starts and stops a dictation in the running copy, handy where the hotkey is taken or under Wayland.

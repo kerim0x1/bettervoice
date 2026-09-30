@@ -46,7 +46,8 @@ Pick how your speech is recognized. Keep everything on your computer with the bu
 - **Speaks your language.** English, German, French, Spanish, Italian, Portuguese, Dutch, Polish, Turkish, Russian, Chinese, Japanese and Arabic — or let BetterVoice detect the language as you go.
 - **Always in view.** A small pill next to your cursor shows that BetterVoice is listening, working, or needs your attention. <kbd>Esc</kbd> cancels at any time.
 - **Fast by design.** Everything up to your last pause is transcribed while you are still talking. On an NVIDIA GPU the offline engine is typically done 0.1–0.4 s after you stop.
-- **Private when you want it.** With the offline engine, audio never leaves your computer. BetterVoice never writes what you dictate to its logs.
+- **Private when you want it.** With the offline engine, audio never leaves your computer.
+- **Nothing gets lost.** Every dictation is also written to the log on your computer, so a text you deleted or pasted into the wrong window can be found again.
 - **Polished on request.** The optional *AI Polish* removes filler words like "um" and "uh" and small slips from any engine's result.
 - **Set up in a minute.** A short first-start setup walks you through engine, key or model download, and language. Everything can be changed later from the tray or menu bar icon.
 

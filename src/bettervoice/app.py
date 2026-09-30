@@ -33,20 +33,29 @@ log = logging.getLogger("bettervoice")
 
 # ------------------------------------------------------------------- log ---
 
-LOG_MAX_BYTES = 1_000_000
+LOG_MAX_BYTES = 5_000_000
+
+
+def open_log(path):
+    """The log file, rotated at LOG_MAX_BYTES. It holds every dictation, so
+    only this user may read it (on Windows, %APPDATA% is private)."""
+    try:
+        if os.path.getsize(path) > LOG_MAX_BYTES:
+            os.replace(path, path + ".1")
+    except OSError:
+        pass
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    if os.name == "posix":
+        os.chmod(path, 0o600)  # also when an older version created it
+    return os.fdopen(fd, "a", buffering=1, encoding="utf-8")
 
 
 def setup_logging():
     """Log to the terminal, or without one (the packaged app, pythonw, a start
-    from the desktop) to config.LOG_PATH. Transcripts are never logged."""
+    from the desktop) to config.LOG_PATH."""
     stream = sys.stdout
     if stream is None or sys.stderr is None or not stream.isatty():
-        try:
-            if os.path.getsize(config.LOG_PATH) > LOG_MAX_BYTES:
-                os.replace(config.LOG_PATH, config.LOG_PATH + ".1")
-        except OSError:
-            pass
-        stream = open(config.LOG_PATH, "a", buffering=1, encoding="utf-8")
+        stream = open_log(config.LOG_PATH)
         sys.stdout = sys.stdout or stream  # pythonw has no console at all
         sys.stderr = sys.stderr or stream
     logging.basicConfig(
@@ -60,6 +69,13 @@ def setup_logging():
 
 def paste_text(text):
     system.paste(text)
+
+
+def log_dictation(text, pasted=True):
+    """Every dictation goes to the log, so a text that was deleted, pasted into
+    the wrong window, or cancelled can be found again."""
+    if text:
+        log.info("dictated%s: %s", "" if pasted else " (cancelled, not pasted)", text)
 
 
 # -------------------------------------------------------------- dictation ---
@@ -130,10 +146,12 @@ class Dictation:
         finally:
             stop_watching()
         if self.cancelled:
+            log_dictation(text, pasted=False)
             return
         text = stt.polish(text, self.engine)
         log.info("recognized %d characters in %.2fs after stop",
                  len(text), time.perf_counter() - started)
+        log_dictation(text, pasted=not self.cancelled)
         if self.cancelled:
             return
         if not text:

@@ -25,6 +25,8 @@
 
 <kbd>Esc</kbd> cancels at any point. If a connection breaks midway, the text recognized so far is still pasted.
 
+Every dictation is also written to the log with its time, including one you cancelled after it was recognized. If a text got deleted or landed in the wrong window, find it with **Open log** in the tray menu.
+
 ## Engines
 
 | | Local | Deepgram | ElevenLabs | OpenRouter |
@@ -76,7 +78,7 @@ When AI Polish is on, a fast text model on OpenRouter removes filler words ("um"
 | Your voice, with a cloud engine | To that provider while you dictate, under the provider's terms and data policy. |
 | The finished text, with AI Polish | To OpenRouter and the model provider, under their terms. |
 | Settings and API keys | A `.env` file in plain text, readable only by your user account: `%APPDATA%\BetterVoice` on Windows, `~/Library/Application Support/BetterVoice` on a Mac, `~/.config/bettervoice` on Linux. |
-| The log | `bettervoice.log` (`%APPDATA%\BetterVoice` on Windows, `~/Library/Logs/BetterVoice` on a Mac, `~/.local/state/bettervoice` on Linux): status and error messages only, never your dictation or your keys. Rotated at 1 MB. |
+| The log | `bettervoice.log` (`%APPDATA%\BetterVoice` on Windows, `~/Library/Logs/BetterVoice` on a Mac, `~/.local/state/bettervoice` on Linux): every dictation with its time, plus status and error messages; never your keys. Readable only by your user account. At 5 MB it moves to `bettervoice.log.1`, replacing the one before. |
 | Your clipboard | Used for pasting. Previous clipboard *text* is restored; other content, such as an image, is replaced by the transcript. |
 
 BetterVoice has no account, telemetry, or analytics. Apart from the engines you use, it only contacts Hugging Face to download offline models and OpenRouter's public model list when you open its settings.

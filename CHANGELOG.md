@@ -2,6 +2,12 @@
 
 All notable changes to BetterVoice are documented here. Versions follow [Semantic Versioning](https://semver.org/); pre-releases carry a beta number, as in `0.1.0b1` (0.1.0 beta 1). Each heading is the exact version: the release workflow takes the release notes from it.
 
+## 0.1.0b3 — 2026-09-30
+
+### Changed
+
+- Every dictation is written to the log again, with its time, including one cancelled after it was recognized. If a text got deleted or landed in the wrong window, find it with **Open log** in the tray menu. The log is readable only by your user account and now moves to `bettervoice.log.1` at 5 MB instead of 1 MB, so it keeps more of your history.
+
 ## 0.1.0b2 — 2026-09-25
 
 ### Changed
